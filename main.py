@@ -119,6 +119,9 @@ async def on_message(message):
                     db["current_number"] = 1
                     save_db(db)
                     await message.channel.send("You need to send an odd number!\nGame restarted. Current number: 1")
+            else:
+                await message.add_reaction("❌")
+                await message.channel.send(f"{message.author.mention}, wrong number! The next number should be {current}")
     except Exception as e:
         print(f"Error in number game: {e}")
 
