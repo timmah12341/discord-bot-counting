@@ -3,7 +3,6 @@ from discord.ext import commands
 from discord import app_commands
 from discord.ui import View, Button
 import random
-import asyncio
 import json
 import os
 
@@ -15,11 +14,12 @@ intents.members = True
 
 # Load/save DB
 DB_FILE = "db.json"
+TRIVIA_FILE = "trivia_questions.json"
 
 def load_db():
     if not os.path.exists(DB_FILE):
         with open(DB_FILE, "w") as f:
-            json.dump({"economy": {}, "inventory": {}, "leaderboard": {}, "current_number": 1, "stats": {}}, f)
+            json.dump({"economy": {}, "inventory": {}, "leaderboard": {}, "current_number": 1, "stats": {}, "banned_words": []}, f)
     with open(DB_FILE, "r") as f:
         return json.load(f)
 
@@ -27,19 +27,25 @@ def save_db():
     with open(DB_FILE, "w") as f:
         json.dump(db, f)
 
+# Load trivia questions
+def load_trivia_questions():
+    if not os.path.exists(TRIVIA_FILE):
+        raise FileNotFoundError(f"{TRIVIA_FILE} is missing. Please add a trivia questions file.")
+    with open(TRIVIA_FILE, "r") as f:
+        return json.load(f)
+
 # Init
 bot = commands.Bot(command_prefix="!", intents=intents, application_id=os.environ.get("APPLICATION_ID"))
 db = load_db()
+trivia_questions = load_trivia_questions()
 
-# Economy helpers
+# --- Economy helpers ---
 def get_balance(uid): return db["economy"].get(uid, 0)
-
 def update_balance(uid, amount):
     db["economy"][uid] = get_balance(uid) + amount
     save_db()
 
 def get_inventory(uid): return db["inventory"].get(uid, [])
-
 def add_item(uid, item):
     inv = get_inventory(uid)
     inv.append(item)
@@ -52,14 +58,15 @@ def create_embed(title, description, color=discord.Color.blurple()):
 
 # --- Trivia ---
 class TriviaView(View):
-    def __init__(self, correct):
+    def __init__(self, question_data):
         super().__init__()
-        self.correct = correct
-
-        options = ["A", "B", "C"]
-        random.shuffle(options)
+        self.correct = question_data['correct']
+        options = list(question_data['choices'].items())
+        random.shuffle(options)  # Shuffle answer choices
+        
         for opt in options:
-            self.add_item(TriviaButton(opt, opt == self.correct))
+            label, _ = opt
+            self.add_item(TriviaButton(label, label == self.correct))
 
 class TriviaButton(Button):
     def __init__(self, label, is_correct):
@@ -75,44 +82,15 @@ class TriviaButton(Button):
 
 @bot.tree.command(name="trivia", description="Answer a trivia question")
 async def trivia(interaction: discord.Interaction):
-    question = "What is the capital of France?"
-    choices = {"A": "Paris", "B": "London", "C": "Rome"}
-    correct = "A"
+    # Pick a random question from the trivia questions list
+    question_data = random.choice(trivia_questions)
+    question = question_data['question']
+    choices = question_data['choices']
 
     embed = create_embed("🧠 Trivia", f"{question}\n\nA) {choices['A']}\nB) {choices['B']}\nC) {choices['C']}")
-    await interaction.response.send_message(embed=embed, view=TriviaView(correct))
+    await interaction.response.send_message(embed=embed, view=TriviaView(question_data))
 
-# --- Math ---
-class MathView(View):
-    def __init__(self, answer):
-        super().__init__()
-        wrongs = [str(answer + i) for i in range(-2, 3) if i != 0]
-        options = [str(answer)] + random.sample(wrongs, 2)
-        random.shuffle(options)
-        for opt in options:
-            self.add_item(MathButton(opt, int(opt) == answer))
-
-class MathButton(Button):
-    def __init__(self, label, is_correct):
-        super().__init__(label=label, style=discord.ButtonStyle.green if is_correct else discord.ButtonStyle.red)
-        self.is_correct = is_correct
-
-    async def callback(self, interaction):
-        if self.is_correct:
-            update_balance(str(interaction.user.id), 30)
-            await interaction.response.send_message(embed=create_embed("✅ Correct!", "You earned 30 coins!", discord.Color.green()), ephemeral=True)
-        else:
-            await interaction.response.send_message(embed=create_embed("❌ Wrong!", "Better luck next time."), ephemeral=True)
-
-@bot.tree.command(name="math", description="Solve a math problem")
-async def math(interaction: discord.Interaction):
-    a, b = random.randint(1, 10), random.randint(1, 10)
-    question = f"{a} + {b}"
-    answer = a + b
-    embed = create_embed("➕ Math Time!", f"What is {question}?")
-    await interaction.response.send_message(embed=embed, view=MathView(answer))
-
-# --- Shop ---
+# --- Shop System ---
 items = {"cookie": 50, "potion": 100, "badge": 200}
 
 @bot.tree.command(name="shop", description="See items for sale")
@@ -131,7 +109,7 @@ async def buy(interaction: discord.Interaction, item: str):
         return
     cost = items[item]
     if get_balance(uid) < cost:
-        await interaction.response.send_message(embed=create_embed("❌ Too Broke", f"You need {cost} coins to buy a {item}"))
+        await interaction.response.send_message(embed=create_embed("❌ Too Broke", f"You need {cost} coins to buy a {item}."))
         return
     update_balance(uid, -cost)
     add_item(uid, item)
@@ -169,50 +147,19 @@ async def on_message(message):
         uid = str(message.author.id)
         current = db["current_number"]
 
-        # Get or initialize user stats
-        user_stats = db.get("stats", {}).get(uid, {"correct": 0, "incorrect": 0})
-        
         if number == current:
-            # Correct input
-            if number % 2 == 1:  # Odd number for the user
-                user_stats["correct"] += 1
+            if number % 2 == 1:
                 db["leaderboard"][uid] = db["leaderboard"].get(uid, 0) + 1
                 db["current_number"] += 1
                 await message.channel.send(embed=create_embed("✅ Good Job", f"Next number is: {db['current_number']}"))
+                db["current_number"] += 1
+                save_db()
             else:
-                # Even numbers are bot's job, reset to 1
                 db["current_number"] = 1
+                save_db()
                 await message.channel.send(embed=create_embed("❌ Wrong!", "Even numbers are bot's job! Game reset."))
-            
-            # Save the stats back to db
-            if "stats" not in db:
-                db["stats"] = {}
-            db["stats"][uid] = user_stats
-            save_db()
         else:
-            # Incorrect number, reset and track the mistake
-            user_stats["incorrect"] += 1
-            db["current_number"] = 1  # Reset to 1
-            await message.channel.send(embed=create_embed("❌ Wrong Number", f"Expected: {current}. Game reset."))
-            
-            # Save stats
-            if "stats" not in db:
-                db["stats"] = {}
-            db["stats"][uid] = user_stats
-            save_db()
-            
+            await message.channel.send(embed=create_embed("❌ Wrong Number", f"Expected: {current}"))
     await bot.process_commands(message)
-
-# --- User Stats Command ---
-@bot.tree.command(name="userstats", description="View your counting game stats")
-async def userstats(interaction: discord.Interaction):
-    uid = str(interaction.user.id)
-    user_stats = db.get("stats", {}).get(uid, {"correct": 0, "incorrect": 0})
-    await interaction.response.send_message(
-        embed=create_embed(
-            "Your Counting Stats", 
-            f"Correct Counts: {user_stats['correct']}\nIncorrect Counts: {user_stats['incorrect']}"
-        )
-    )
 
 bot.run(os.environ["DISCORD_TOKEN"])
