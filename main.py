@@ -1,9 +1,11 @@
 import discord
 from discord.ext import commands
+from discord import app_commands
+from discord.ui import View, Button
 import random
 import asyncio
-import os
 import json
+import os
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -11,121 +13,172 @@ intents.messages = True
 intents.guilds = True
 intents.members = True
 
-# Load and save database
+# Load/save DB
+DB_FILE = "db.json"
 def load_db():
-    if not os.path.exists("db.json"):
-        with open("db.json", "w") as f:
-            json.dump({
-                "current_number": 1,
-                "leaderboard": {},
-                "economy": {},
-                "banned_words": []
-            }, f)
-    with open("db.json", "r") as f:
+    if not os.path.exists(DB_FILE):
+        with open(DB_FILE, "w") as f:
+            json.dump({"economy": {}, "inventory": {}, "leaderboard": {}, "current_number": 1}, f)
+    with open(DB_FILE, "r") as f:
         return json.load(f)
 
-def save_db(db):
-    with open("db.json", "w") as f:
+def save_db():
+    with open(DB_FILE, "w") as f:
         json.dump(db, f)
 
+# Init
+bot = commands.Bot(command_prefix="!", intents=intents, application_id=os.environ.get("APPLICATION_ID"))
 db = load_db()
 
-bot = commands.Bot(command_prefix="!", intents=intents, application_id=os.environ.get("APPLICATION_ID"))
+# Economy helpers
+def get_balance(uid): return db["economy"].get(uid, 0)
+def update_balance(uid, amount):
+    db["economy"][uid] = get_balance(uid) + amount
+    save_db()
 
-@bot.event
-async def on_ready():
-    print(f"✅ Bot is online as: {bot.user.name}")
-    try:
-        synced = await bot.tree.sync()
-        print(f"🔃 Synced {len(synced)} command(s)")
-    except Exception as e:
-        print(f"⚠️ Failed to sync commands: {e}")
+def get_inventory(uid): return db["inventory"].get(uid, [])
+def add_item(uid, item):
+    inv = get_inventory(uid)
+    inv.append(item)
+    db["inventory"][uid] = inv
+    save_db()
 
-async def handle_permission_error(interaction: discord.Interaction):
-    await interaction.response.send_message("❌ You don't have permission to use this command!", ephemeral=True)
+# --- Embeds ---
+def create_embed(title, description, color=discord.Color.blurple()):
+    return discord.Embed(title=title, description=description, color=color)
 
-# Economy functions
-def get_balance(user_id: str) -> int:
-    return db["economy"].get(user_id, 0)
+# --- Trivia ---
+class TriviaView(View):
+    def __init__(self, correct):
+        super().__init__()
+        self.correct = correct
 
-def update_balance(user_id: str, amount: int):
-    db["economy"][user_id] = get_balance(user_id) + amount
-    save_db(db)
+        options = ["A", "B", "C"]
+        random.shuffle(options)
+        for opt in options:
+            self.add_item(TriviaButton(opt, opt == self.correct))
 
-# Add banned word command
-@bot.tree.command(name="add_banned_word", description="Add a word to banned list")
-async def add_banned_word(interaction: discord.Interaction, word: str):
-    if interaction.user.guild_permissions.manage_messages:
-        db["banned_words"].append(word.lower())
-        save_db(db)
-        await interaction.response.send_message(f"Added '{word}' to banned words list")
-    else:
-        await handle_permission_error(interaction)
+class TriviaButton(Button):
+    def __init__(self, label, is_correct):
+        super().__init__(label=label, style=discord.ButtonStyle.green if is_correct else discord.ButtonStyle.red)
+        self.is_correct = is_correct
 
-# Balance command
-@bot.tree.command(name="balance", description="Check your balance and stats")
-async def balance(interaction: discord.Interaction):
-    user_id = str(interaction.user.id)
-    bal = get_balance(user_id)
-    score = db["leaderboard"].get(user_id, 0)
-    embed = discord.Embed(title="👤 User Profile", color=discord.Color.gold())
-    embed.add_field(name="💰 Balance", value=f"{bal} coins", inline=False)
-    embed.add_field(name="🏆 Score", value=f"{score} points", inline=False)
+    async def callback(self, interaction):
+        if self.is_correct:
+            update_balance(str(interaction.user.id), 50)
+            await interaction.response.send_message(embed=create_embed("✅ Correct!", "You earned 50 coins!", discord.Color.green()), ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=create_embed("❌ Wrong!", "Better luck next time."), ephemeral=True)
+
+@bot.tree.command(name="trivia", description="Answer a trivia question")
+async def trivia(interaction: discord.Interaction):
+    question = "What is the capital of France?"
+    choices = {"A": "Paris", "B": "London", "C": "Rome"}
+    correct = "A"
+
+    embed = create_embed("🧠 Trivia", f"{question}\n\nA) {choices['A']}\nB) {choices['B']}\nC) {choices['C']}")
+    await interaction.response.send_message(embed=embed, view=TriviaView(correct))
+
+# --- Math ---
+class MathView(View):
+    def __init__(self, answer):
+        super().__init__()
+        wrongs = [str(answer + i) for i in range(-2, 3) if i != 0]
+        options = [str(answer)] + random.sample(wrongs, 2)
+        random.shuffle(options)
+        for opt in options:
+            self.add_item(MathButton(opt, int(opt) == answer))
+
+class MathButton(Button):
+    def __init__(self, label, is_correct):
+        super().__init__(label=label, style=discord.ButtonStyle.green if is_correct else discord.ButtonStyle.red)
+        self.is_correct = is_correct
+
+    async def callback(self, interaction):
+        if self.is_correct:
+            update_balance(str(interaction.user.id), 30)
+            await interaction.response.send_message(embed=create_embed("✅ Correct!", "You earned 30 coins!", discord.Color.green()), ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=create_embed("❌ Wrong!", "Better luck next time."), ephemeral=True)
+
+@bot.tree.command(name="math", description="Solve a math problem")
+async def math(interaction: discord.Interaction):
+    a, b = random.randint(1, 10), random.randint(1, 10)
+    question = f"{a} + {b}"
+    answer = a + b
+    embed = create_embed("➕ Math Time!", f"What is {question}?")
+    await interaction.response.send_message(embed=embed, view=MathView(answer))
+
+# --- Shop ---
+items = {"cookie": 50, "potion": 100, "badge": 200}
+
+@bot.tree.command(name="shop", description="See items for sale")
+async def shop(interaction: discord.Interaction):
+    desc = "\n".join([f"**{item}** - {price} coins" for item, price in items.items()])
+    embed = create_embed("🛍️ Shop", desc)
     await interaction.response.send_message(embed=embed)
 
-# Work command
-@bot.tree.command(name="work", description="Work to earn coins")
-async def work(interaction: discord.Interaction):
-    jobs = ["programmer", "chef", "doctor", "teacher", "artist"]
-    earnings = random.randint(10, 100)
-    job = random.choice(jobs)
-    update_balance(str(interaction.user.id), earnings)
-    await interaction.response.send_message(f"You worked as a {job} and earned {earnings} coins!")
+@bot.tree.command(name="buy", description="Buy an item")
+@app_commands.describe(item="The item you want to buy")
+async def buy(interaction: discord.Interaction, item: str):
+    uid = str(interaction.user.id)
+    item = item.lower()
+    if item not in items:
+        await interaction.response.send_message(embed=create_embed("❌ Not Found", "That item doesn't exist."))
+        return
+    cost = items[item]
+    if get_balance(uid) < cost:
+        await interaction.response.send_message(embed=create_embed("❌ Too Broke", f"You need {cost} coins to buy a {item}"))
+        return
+    update_balance(uid, -cost)
+    add_item(uid, item)
+    await interaction.response.send_message(embed=create_embed("✅ Bought!", f"You purchased a {item} for {cost} coins."))
 
-# Current number command
-@bot.tree.command(name="current", description="Check the current number in the counting game")
-async def current(interaction: discord.Interaction):
-    await interaction.response.send_message(f"The current number is: {db['current_number']}")
+@bot.tree.command(name="inventory", description="View your items")
+async def inventory(interaction: discord.Interaction):
+    uid = str(interaction.user.id)
+    inv = get_inventory(uid)
+    if not inv:
+        await interaction.response.send_message(embed=create_embed("📦 Inventory", "You own nothing yet."))
+    else:
+        counts = {i: inv.count(i) for i in set(inv)}
+        desc = "\n".join([f"{item} x{amount}" for item, amount in counts.items()])
+        await interaction.response.send_message(embed=create_embed("📦 Inventory", desc))
 
-# Counting game handler
+# --- Leaderboard ---
+@bot.tree.command(name="leaderboard", description="Top number game players")
+async def leaderboard(interaction: discord.Interaction):
+    lb = db["leaderboard"]
+    sorted_lb = sorted(lb.items(), key=lambda x: x[1], reverse=True)[:10]
+    embed = discord.Embed(title="🏆 Leaderboard", color=discord.Color.gold())
+    for i, (uid, score) in enumerate(sorted_lb, 1):
+        user = await bot.fetch_user(int(uid))
+        embed.add_field(name=f"{i}. {user.name}", value=f"{score} points", inline=False)
+    await interaction.response.send_message(embed=embed)
+
+# --- Counting Game ---
 @bot.event
 async def on_message(message):
-    if message.author == bot.user:
+    if message.author.bot:
         return
+    if message.content.isdigit():
+        number = int(message.content)
+        uid = str(message.author.id)
+        current = db["current_number"]
 
-    # Check for banned words
-    if any(word in message.content.lower() for word in db["banned_words"]):
-        await message.delete()
-        await message.channel.send(f"{message.author.mention} That word is not allowed!")
-        return
-
-    # Counting game logic
-    try:
-        if message.content.isdigit():
-            number = int(message.content)
-            current = db["current_number"]
-
-            if number == current:
-                if number % 2 == 1:
-                    uid = str(message.author.id)
-                    db["leaderboard"][uid] = db["leaderboard"].get(uid, 0) + 1
-                    db["current_number"] += 1
-                    await message.add_reaction("✅")
-                    await message.channel.send(str(db["current_number"]))  # bot posts even number
-                    db["current_number"] += 1
-                    save_db(db)
-                else:
-                    await message.add_reaction("❌")
-                    db["current_number"] = 1
-                    save_db(db)
-                    await message.channel.send("You need to send an odd number!\nGame restarted. Current number: 1")
+        if number == current:
+            if number % 2 == 1:
+                db["leaderboard"][uid] = db["leaderboard"].get(uid, 0) + 1
+                db["current_number"] += 1
+                await message.channel.send(embed=create_embed("✅ Good Job", f"Next number is: {db['current_number']}"))
+                db["current_number"] += 1
+                save_db()
             else:
-                await message.add_reaction("❌")
-                await message.channel.send(f"{message.author.mention}, wrong number! The next number should be {current}")
-    except Exception as e:
-        print(f"Error in number game: {e}")
-
+                db["current_number"] = 1
+                save_db()
+                await message.channel.send(embed=create_embed("❌ Wrong!", "Even numbers are bot's job! Game reset."))
+        else:
+            await message.channel.send(embed=create_embed("❌ Wrong Number", f"Expected: {current}"))
     await bot.process_commands(message)
 
-# Run the bot
 bot.run(os.environ["DISCORD_TOKEN"])
