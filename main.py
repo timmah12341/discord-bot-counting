@@ -6,20 +6,18 @@ import random
 import json
 import os
 
+# Intents Setup
 intents = discord.Intents.default()
 intents.message_content = True
-intents.messages = True
 intents.guilds = True
 intents.members = True
 
-# Load/save DB
+# Load/Save Database
 DB_FILE = "db.json"
-TRIVIA_FILE = "trivia_questions.json"
-
 def load_db():
     if not os.path.exists(DB_FILE):
         with open(DB_FILE, "w") as f:
-            json.dump({"economy": {}, "inventory": {}, "leaderboard": {}, "current_number": 1, "stats": {}, "banned_words": []}, f)
+            json.dump({"economy": {}, "inventory": {}, "leaderboard": {}, "current_number": 1, "banned_words": []}, f)
     with open(DB_FILE, "r") as f:
         return json.load(f)
 
@@ -27,19 +25,11 @@ def save_db():
     with open(DB_FILE, "w") as f:
         json.dump(db, f)
 
-# Load trivia questions
-def load_trivia_questions():
-    if not os.path.exists(TRIVIA_FILE):
-        raise FileNotFoundError(f"{TRIVIA_FILE} is missing. Please add a trivia questions file.")
-    with open(TRIVIA_FILE, "r") as f:
-        return json.load(f)
-
-# Init
-bot = commands.Bot(command_prefix="!", intents=intents, application_id=os.environ.get("APPLICATION_ID"))
+# Initialize the bot
+bot = commands.Bot(command_prefix="!", intents=intents, application_id=os.environ["APPLICATION_ID"])
 db = load_db()
-trivia_questions = load_trivia_questions()
 
-# --- Economy helpers ---
+# Database helpers
 def get_balance(uid): return db["economy"].get(uid, 0)
 def update_balance(uid, amount):
     db["economy"][uid] = get_balance(uid) + amount
@@ -52,21 +42,24 @@ def add_item(uid, item):
     db["inventory"][uid] = inv
     save_db()
 
-# --- Embeds ---
+# Embeds
 def create_embed(title, description, color=discord.Color.blurple()):
     return discord.Embed(title=title, description=description, color=color)
 
-# --- Trivia ---
+# Trivia Command
+trivia_questions = [
+    {"question": "What is the capital of France?", "choices": {"A": "Paris", "B": "London", "C": "Rome"}, "correct": "A"},
+    {"question": "Who wrote 'Romeo and Juliet'?", "choices": {"A": "Shakespeare", "B": "Dickens", "C": "Austen"}, "correct": "A"},
+    
+]
+
 class TriviaView(View):
-    def __init__(self, question_data):
+    def __init__(self, correct):
         super().__init__()
-        self.correct = question_data['correct']
-        options = list(question_data['choices'].items())
-        random.shuffle(options)  # Shuffle answer choices
-        
+        options = ["A", "B", "C"]
+        random.shuffle(options)
         for opt in options:
-            label, _ = opt
-            self.add_item(TriviaButton(label, label == self.correct))
+            self.add_item(TriviaButton(opt, opt == correct))
 
 class TriviaButton(Button):
     def __init__(self, label, is_correct):
@@ -82,15 +75,44 @@ class TriviaButton(Button):
 
 @bot.tree.command(name="trivia", description="Answer a trivia question")
 async def trivia(interaction: discord.Interaction):
-    # Pick a random question from the trivia questions list
-    question_data = random.choice(trivia_questions)
-    question = question_data['question']
-    choices = question_data['choices']
+    question = random.choice(trivia_questions)
+    choices = question["choices"]
+    correct = question["correct"]
 
-    embed = create_embed("🧠 Trivia", f"{question}\n\nA) {choices['A']}\nB) {choices['B']}\nC) {choices['C']}")
-    await interaction.response.send_message(embed=embed, view=TriviaView(question_data))
+    embed = create_embed("🧠 Trivia", f"{question['question']}\n\nA) {choices['A']}\nB) {choices['B']}\nC) {choices['C']}")
+    await interaction.response.send_message(embed=embed, view=TriviaView(correct))
 
-# --- Shop System ---
+# Math Command
+class MathView(View):
+    def __init__(self, answer):
+        super().__init__()
+        wrongs = [str(answer + i) for i in range(-2, 3) if i != 0]
+        options = [str(answer)] + random.sample(wrongs, 2)
+        random.shuffle(options)
+        for opt in options:
+            self.add_item(MathButton(opt, int(opt) == answer))
+
+class MathButton(Button):
+    def __init__(self, label, is_correct):
+        super().__init__(label=label, style=discord.ButtonStyle.green if is_correct else discord.ButtonStyle.red)
+        self.is_correct = is_correct
+
+    async def callback(self, interaction):
+        if self.is_correct:
+            update_balance(str(interaction.user.id), 30)
+            await interaction.response.send_message(embed=create_embed("✅ Correct!", "You earned 30 coins!", discord.Color.green()), ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=create_embed("❌ Wrong!", "Better luck next time."), ephemeral=True)
+
+@bot.tree.command(name="math", description="Solve a math problem")
+async def math(interaction: discord.Interaction):
+    a, b = random.randint(1, 10), random.randint(1, 10)
+    question = f"{a} + {b}"
+    answer = a + b
+    embed = create_embed("➕ Math Time!", f"What is {question}?")
+    await interaction.response.send_message(embed=embed, view=MathView(answer))
+
+# Shop Command
 items = {"cookie": 50, "potion": 100, "badge": 200}
 
 @bot.tree.command(name="shop", description="See items for sale")
@@ -109,12 +131,13 @@ async def buy(interaction: discord.Interaction, item: str):
         return
     cost = items[item]
     if get_balance(uid) < cost:
-        await interaction.response.send_message(embed=create_embed("❌ Too Broke", f"You need {cost} coins to buy a {item}."))
+        await interaction.response.send_message(embed=create_embed("❌ Too Broke", f"You need {cost} coins to buy a {item}"))
         return
     update_balance(uid, -cost)
     add_item(uid, item)
     await interaction.response.send_message(embed=create_embed("✅ Bought!", f"You purchased a {item} for {cost} coins."))
 
+# Inventory Command
 @bot.tree.command(name="inventory", description="View your items")
 async def inventory(interaction: discord.Interaction):
     uid = str(interaction.user.id)
@@ -126,7 +149,7 @@ async def inventory(interaction: discord.Interaction):
         desc = "\n".join([f"{item} x{amount}" for item, amount in counts.items()])
         await interaction.response.send_message(embed=create_embed("📦 Inventory", desc))
 
-# --- Leaderboard ---
+# Leaderboard Command
 @bot.tree.command(name="leaderboard", description="Top number game players")
 async def leaderboard(interaction: discord.Interaction):
     lb = db["leaderboard"]
@@ -137,7 +160,7 @@ async def leaderboard(interaction: discord.Interaction):
         embed.add_field(name=f"{i}. {user.name}", value=f"{score} points", inline=False)
     await interaction.response.send_message(embed=embed)
 
-# --- Counting Game ---
+# Counting Game (Message-based)
 @bot.event
 async def on_message(message):
     if message.author.bot:
@@ -161,5 +184,11 @@ async def on_message(message):
         else:
             await message.channel.send(embed=create_embed("❌ Wrong Number", f"Expected: {current}"))
     await bot.process_commands(message)
+
+# Sync Commands with Discord
+@bot.event
+async def on_ready():
+    await bot.tree.sync()
+    print(f'We have logged in as {bot.user}')
 
 bot.run(os.environ["DISCORD_TOKEN"])
