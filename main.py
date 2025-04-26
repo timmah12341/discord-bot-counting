@@ -15,10 +15,11 @@ intents.members = True
 
 # Load/save DB
 DB_FILE = "db.json"
+
 def load_db():
     if not os.path.exists(DB_FILE):
         with open(DB_FILE, "w") as f:
-            json.dump({"economy": {}, "inventory": {}, "leaderboard": {}, "current_number": 1}, f)
+            json.dump({"economy": {}, "inventory": {}, "leaderboard": {}, "current_number": 1, "stats": {}}, f)
     with open(DB_FILE, "r") as f:
         return json.load(f)
 
@@ -32,11 +33,13 @@ db = load_db()
 
 # Economy helpers
 def get_balance(uid): return db["economy"].get(uid, 0)
+
 def update_balance(uid, amount):
     db["economy"][uid] = get_balance(uid) + amount
     save_db()
 
 def get_inventory(uid): return db["inventory"].get(uid, [])
+
 def add_item(uid, item):
     inv = get_inventory(uid)
     inv.append(item)
@@ -166,19 +169,50 @@ async def on_message(message):
         uid = str(message.author.id)
         current = db["current_number"]
 
+        # Get or initialize user stats
+        user_stats = db.get("stats", {}).get(uid, {"correct": 0, "incorrect": 0})
+        
         if number == current:
-            if number % 2 == 1:
+            # Correct input
+            if number % 2 == 1:  # Odd number for the user
+                user_stats["correct"] += 1
                 db["leaderboard"][uid] = db["leaderboard"].get(uid, 0) + 1
                 db["current_number"] += 1
                 await message.channel.send(embed=create_embed("✅ Good Job", f"Next number is: {db['current_number']}"))
-                db["current_number"] += 1
-                save_db()
             else:
+                # Even numbers are bot's job, reset to 1
                 db["current_number"] = 1
-                save_db()
                 await message.channel.send(embed=create_embed("❌ Wrong!", "Even numbers are bot's job! Game reset."))
+            
+            # Save the stats back to db
+            if "stats" not in db:
+                db["stats"] = {}
+            db["stats"][uid] = user_stats
+            save_db()
         else:
-            await message.channel.send(embed=create_embed("❌ Wrong Number", f"Expected: {current}"))
+            # Incorrect number, reset and track the mistake
+            user_stats["incorrect"] += 1
+            db["current_number"] = 1  # Reset to 1
+            await message.channel.send(embed=create_embed("❌ Wrong Number", f"Expected: {current}. Game reset."))
+            
+            # Save stats
+            if "stats" not in db:
+                db["stats"] = {}
+            db["stats"][uid] = user_stats
+            save_db()
+            
     await bot.process_commands(message)
+
+# --- User Stats Command ---
+@bot.tree.command(name="userstats", description="View your counting game stats")
+async def userstats(interaction: discord.Interaction):
+    uid = str(interaction.user.id)
+    user_stats = db.get("stats", {}).get(uid, {"correct": 0, "incorrect": 0})
+    await interaction.response.send_message(
+        embed=create_embed(
+            "Your Counting Stats", 
+            f"Correct Counts: {user_stats['correct']}\nIncorrect Counts: {user_stats['incorrect']}"
+        )
+    )
 
 bot.run(os.environ["DISCORD_TOKEN"])
