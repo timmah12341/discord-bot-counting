@@ -5,6 +5,7 @@ import json
 import random
 import asyncio
 
+
 intents = discord.Intents.default()
 intents.message_content = True
 
@@ -190,5 +191,5 @@ async def buy(interaction: discord.Interaction, item_name: str):
     save_db()
     await interaction.response.send_message(f"You bought **{item_name_capitalized}** for {price} coins!")
 
-# Run bot
-bot.run("YOUR_TOKEN_HERE")
+# Run bot with token variable
+bot.run(DISCORD_TOKEN)
