@@ -1,116 +1,145 @@
 import discord
 from discord.ext import commands
+from discord import app_commands
 import random
 import json
-import os
 
 intents = discord.Intents.default()
-intents.messages = True
-intents.guilds = True
 intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents)
 
-bot = commands.Bot(command_prefix="/", intents=intents)
+# Load database
+try:
+    with open('database.json', 'r') as f:
+        db = json.load(f)
+except FileNotFoundError:
+    db = {"current_number": 1, "leaderboard": {}, "economy": {}, "banned_words": [], "inventory": {}}
 
-# Load or create the database
-if not os.path.exists("database.json"):
-    with open("database.json", "w") as f:
-        json.dump({"current_number": 1, "leaderboard": {}, "economy": {}, "banned_words": []}, f)
-
-with open("database.json", "r") as f:
-    db = json.load(f)
-
-# Load trivia questions
-with open("trivia.json", "r") as f:
-    trivia_questions = json.load(f)
-
-# Save database
 def save_db():
-    with open("database.json", "w") as f:
+    with open('database.json', 'w') as f:
         json.dump(db, f, indent=4)
+
+# Load trivia
+with open('trivia.json', 'r') as f:
+    trivia_questions = json.load(f)
 
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user}")
-
-@bot.command()
-async def count(ctx, number: int):
-    if number == db["current_number"]:
-        db["current_number"] += 1
-        db["leaderboard"].setdefault(str(ctx.author.id), 0)
-        db["leaderboard"][str(ctx.author.id)] += 1
-        save_db()
-        await ctx.send(f"{number}")
-    else:
-        await ctx.send(f"{db['current_number']}")
-
-@bot.command()
-async def leaderboard(ctx):
-    sorted_leaderboard = sorted(db["leaderboard"].items(), key=lambda x: x[1], reverse=True)
-    description = ""
-    for i, (user_id, score) in enumerate(sorted_leaderboard[:10], start=1):
-        user = await bot.fetch_user(int(user_id))
-        description += f"{i}. {user.name}: {score}\n"
-    
-    embed = discord.Embed(title="Leaderboard", description=description, color=discord.Color.blue())
-    await ctx.send(embed=embed)
-
-@bot.command()
-async def trivia(ctx):
-    question = random.choice(trivia_questions)
-    embed = discord.Embed(title="Trivia Time!", description=question["question"], color=discord.Color.green())
-    
-    for option, answer in question["choices"].items():
-        embed.add_field(name=option, value=answer, inline=False)
-    
-    message = await ctx.send(embed=embed)
-
-    def check(m):
-        return m.author == ctx.author and m.channel == ctx.channel and m.content.upper() in ["A", "B", "C"]
-
+    print(f'Logged in as {bot.user}')
     try:
-        guess = await bot.wait_for('message', timeout=20.0, check=check)
-    except asyncio.TimeoutError:
-        await ctx.send(f"Time's up! The correct answer was {question['correct']}.")
+        synced = await bot.tree.sync()
+        print(f"Synced {len(synced)} slash commands")
+    except Exception as e:
+        print(f"Error syncing commands: {e}")
+
+# /balance
+@bot.tree.command(name="balance")
+async def balance(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    balance = db["economy"].get(user_id, 0)
+    await interaction.response.send_message(f"You have {balance} coins.")
+
+# /buy
+@bot.tree.command(name="buy")
+@app_commands.describe(item="The item you want to buy")
+async def buy(interaction: discord.Interaction, item: str):
+    user_id = str(interaction.user.id)
+    shop_items = {
+        "cool_role": 200,
+        "epic_title": 500
+    }
+
+    item = item.lower()
+
+    if item not in shop_items:
+        await interaction.response.send_message("That item doesn't exist.", ephemeral=True)
         return
 
-    if guess.content.upper() == question["correct"]:
-        await ctx.send("Correct!")
-        db["economy"].setdefault(str(ctx.author.id), 0)
-        db["economy"][str(ctx.author.id)] += 10
+    price = shop_items[item]
+    balance = db["economy"].get(user_id, 0)
+
+    if balance >= price:
+        db["economy"][user_id] -= price
+        db["inventory"].setdefault(user_id, [])
+        db["inventory"][user_id].append(item)
         save_db()
+        await interaction.response.send_message(f"You bought **{item}** for {price} coins!")
     else:
-        await ctx.send(f"Wrong! Correct answer: {question['correct']}")
+        await interaction.response.send_message(f"Not enough coins! You need {price - balance} more.", ephemeral=True)
 
-@bot.command()
-async def balance(ctx):
-    balance = db["economy"].get(str(ctx.author.id), 0)
-    await ctx.send(f"You have {balance} coins.")
+# /inventory
+@bot.tree.command(name="inventory")
+async def inventory(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    items = db["inventory"].get(user_id, [])
 
-@bot.command()
-async def addban(ctx, *, word):
-    db["banned_words"].append(word.lower())
-    save_db()
-    await ctx.send(f"Added `{word}` to banned words list.")
-
-@bot.command()
-async def banned(ctx):
-    if db["banned_words"]:
-        await ctx.send("Banned words: " + ", ".join(db["banned_words"]))
-    else:
-        await ctx.send("No banned words yet!")
-
-@bot.event
-async def on_message(message):
-    if message.author == bot.user:
+    if not items:
+        await interaction.response.send_message("You don't have any items yet.")
         return
 
-    for word in db["banned_words"]:
-        if word in message.content.lower():
-            await message.delete()
-            await message.channel.send(f"{message.author.mention}, that word is banned!")
-            return
+    item_list = "\n".join(f"- {item}" for item in items)
+    embed = discord.Embed(title=f"{interaction.user.name}'s Inventory", description=item_list, color=discord.Color.orange())
+    await interaction.response.send_message(embed=embed)
 
-    await bot.process_commands(message)
+# /use
+@bot.tree.command(name="use")
+@app_commands.describe(item="The item you want to use")
+async def use(interaction: discord.Interaction, item: str):
+    user_id = str(interaction.user.id)
+    items = db["inventory"].get(user_id, [])
 
-# Your bot token here
-bot.run("YOUR_BOT_TOKEN")
+    if item.lower() not in items:
+        await interaction.response.send_message("You don't have that item.", ephemeral=True)
+        return
+
+    # Example effect
+    await interaction.response.send_message(f"You used **{item}**! It sparkled!")
+
+    # Remove item after use
+    items.remove(item.lower())
+    db["inventory"][user_id] = items
+    save_db()
+
+# /trivia
+@bot.tree.command(name="trivia")
+async def trivia(interaction: discord.Interaction):
+    question = random.choice(trivia_questions)
+
+    class TriviaButton(discord.ui.Button):
+        def __init__(self, label, is_correct):
+            super().__init__(label=label, style=discord.ButtonStyle.primary)
+            self.is_correct = is_correct
+            self.answered = False
+
+        async def callback(self, button_interaction: discord.Interaction):
+            if self.view.answered:
+                await button_interaction.response.send_message("Trivia already answered.", ephemeral=True)
+                return
+
+            self.view.answered = True
+
+            for child in self.view.children:
+                if isinstance(child, discord.ui.Button):
+                    child.disabled = True
+                    if child.is_correct:
+                        child.style = discord.ButtonStyle.success
+                    else:
+                        child.style = discord.ButtonStyle.secondary
+
+            if self.is_correct:
+                user_id = str(interaction.user.id)
+                db["economy"][user_id] = db["economy"].get(user_id, 0) + 50
+                save_db()
+                await button_interaction.response.edit_message(content="Correct! +50 coins!", view=self.view)
+            else:
+                await button_interaction.response.edit_message(content="Wrong!", view=self.view)
+
+    view = discord.ui.View()
+    for key, choice in question["choices"].items():
+        is_correct = (key == question["correct"])
+        view.add_item(TriviaButton(label=choice, is_correct=is_correct))
+    view.answered = False
+
+    await interaction.response.send_message(f"**Trivia:** {question['question']}", view=view)
+
+bot.run('YOUR_BOT_TOKEN')
