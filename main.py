@@ -1,125 +1,116 @@
 import discord
 from discord.ext import commands
-from discord import app_commands
-from discord.ui import View, Button
 import random
 import json
 import os
 
-# Intents Setup
 intents = discord.Intents.default()
-intents.message_content = True
+intents.messages = True
 intents.guilds = True
-intents.members = True
+intents.message_content = True
 
-# Load/Save Database
-DB_FILE = "db.json"
-def load_db():
-    if not os.path.exists(DB_FILE):
-        with open(DB_FILE, "w") as f:
-            json.dump({"economy": {}, "inventory": {}, "leaderboard": {}, "current_number": 1, "banned_words": []}, f)
-    with open(DB_FILE, "r") as f:
-        return json.load(f)
+bot = commands.Bot(command_prefix="/", intents=intents)
 
+# Load or create the database
+if not os.path.exists("database.json"):
+    with open("database.json", "w") as f:
+        json.dump({"current_number": 1, "leaderboard": {}, "economy": {}, "banned_words": []}, f)
+
+with open("database.json", "r") as f:
+    db = json.load(f)
+
+# Load trivia questions
+with open("trivia.json", "r") as f:
+    trivia_questions = json.load(f)
+
+# Save database
 def save_db():
-    with open(DB_FILE, "w") as f:
-        json.dump(db, f)
+    with open("database.json", "w") as f:
+        json.dump(db, f, indent=4)
 
-# Initialize the bot
-bot = commands.Bot(command_prefix="!", intents=intents, application_id=os.environ["APPLICATION_ID"])
-db = load_db()
-
-# Database helpers
-def get_balance(uid): return db["economy"].get(uid, 0)
-def update_balance(uid, amount):
-    db["economy"][uid] = get_balance(uid) + amount
-    save_db()
-
-def get_inventory(uid): return db["inventory"].get(uid, [])
-def add_item(uid, item):
-    inv = get_inventory(uid)
-    inv.append(item)
-    db["inventory"][uid] = inv
-    save_db()
-
-# Embeds
-def create_embed(title, description, color=discord.Color.blurple()):
-    return discord.Embed(title=title, description=description, color=color)
-
-# Trivia Questions
-trivia_questions = [
-    {"question": "What is the capital of France?", "choices": {"A": "Paris", "B": "London", "C": "Rome"}, "correct": "A"},
-    {"question": "Who wrote 'Romeo and Juliet'?", "choices": {"A": "Shakespeare", "B": "Dickens", "C": "Hemingway"}, "correct": "A"},
-    {"question": "What is the largest planet in our solar system?", "choices": {"A": "Earth", "B": "Jupiter", "C": "Saturn"}, "correct": "B"},
-    {"question": "In which country would you find the Great Barrier Reef?", "choices": {"A": "Australia", "B": "USA", "C": "Japan"}, "correct": "A"},
-    {"question": "What is the tallest mountain in the world?", "choices": {"A": "Mount Everest", "B": "Mount Kilimanjaro", "C": "Mount Fuji"}, "correct": "A"},
-    {"question": "What is the smallest country in the world?", "choices": {"A": "Monaco", "B": "Vatican City", "C": "San Marino"}, "correct": "B"},
-    {"question": "What is the longest river in the world?", "choices": {"A": "Amazon", "B": "Nile", "C": "Yangtze"}, "correct": "B"},
-    {"question": "Which element has the chemical symbol 'O'?", "choices": {"A": "Oxygen", "B": "Osmium", "C": "Ozone"}, "correct": "A"},
-    {"question": "What is the speed of light?", "choices": {"A": "300,000 km/s", "B": "150,000 km/s", "C": "500,000 km/s"}, "correct": "A"},
-    {"question": "Which planet is known as the Red Planet?", "choices": {"A": "Mars", "B": "Venus", "C": "Mercury"}, "correct": "A"},
-    {"question": "What is the capital of Japan?", "choices": {"A": "Beijing", "B": "Seoul", "C": "Tokyo"}, "correct": "C"},
-    {"question": "Which animal is known as the king of the jungle?", "choices": {"A": "Lion", "B": "Elephant", "C": "Tiger"}, "correct": "A"},
-    {"question": "How many continents are there?", "choices": {"A": "5", "B": "7", "C": "6"}, "correct": "B"},
-    {"question": "Which country is known as the Land of the Rising Sun?", "choices": {"A": "China", "B": "Japan", "C": "South Korea"}, "correct": "B"},
-    {"question": "Who painted the Mona Lisa?", "choices": {"A": "Picasso", "B": "Van Gogh", "C": "Da Vinci"}, "correct": "C"},
-    {"question": "What is the chemical symbol for water?", "choices": {"A": "H2O", "B": "H2O2", "C": "CO2"}, "correct": "A"},
-    {"question": "What is the largest animal on Earth?", "choices": {"A": "Elephant", "B": "Blue whale", "C": "Giraffe"}, "correct": "B"},
-    {"question": "Which country invented pizza?", "choices": {"A": "USA", "B": "Italy", "C": "France"}, "correct": "B"},
-    {"question": "What is the hardest natural substance on Earth?", "choices": {"A": "Gold", "B": "Diamond", "C": "Iron"}, "correct": "B"},
-    {"question": "Which element has the chemical symbol 'Na'?", "choices": {"A": "Neon", "B": "Sodium", "C": "Nickel"}, "correct": "B"},
-    {"question": "In which year did World War I begin?", "choices": {"A": "1912", "B": "1914", "C": "1916"}, "correct": "B"},
-    {"question": "Which planet is the closest to the sun?", "choices": {"A": "Mercury", "B": "Venus", "C": "Earth"}, "correct": "A"},
-    {"question": "Who discovered penicillin?", "choices": {"A": "Marie Curie", "B": "Alexander Fleming", "C": "Isaac Newton"}, "correct": "B"},
-    {"question": "What is the capital of Canada?", "choices": {"A": "Toronto", "B": "Ottawa", "C": "Vancouver"}, "correct": "B"},
-    {"question": "What is the national sport of Japan?", "choices": {"A": "Sumo", "B": "Baseball", "C": "Soccer"}, "correct": "A"},
-    {"question": "Which country is the largest by land area?", "choices": {"A": "China", "B": "USA", "C": "Russia"}, "correct": "C"},
-    {"question": "Which artist is famous for his work 'Starry Night'?", "choices": {"A": "Van Gogh", "B": "Monet", "C": "Picasso"}, "correct": "A"},
-    {"question": "What is the longest running TV show?", "choices": {"A": "The Simpsons", "B": "Friends", "C": "The Office"}, "correct": "A"},
-    {"question": "Which animal is the fastest on land?", "choices": {"A": "Lion", "B": "Cheetah", "C": "Elephant"}, "correct": "B"},
-    {"question": "Which language is primarily spoken in Brazil?", "choices": {"A": "Spanish", "B": "Portuguese", "C": "French"}, "correct": "B"},
-    {"question": "Which ocean is the largest?", "choices": {"A": "Atlantic", "B": "Indian", "C": "Pacific"}, "correct": "C"},
-    {"question": "What is the tallest building in the world?", "choices": {"A": "Burj Khalifa", "B": "Empire State Building", "C": "Eiffel Tower"}, "correct": "A"},
-    {"question": "Which country is home to the Great Pyramids?", "choices": {"A": "Mexico", "B": "Egypt", "C": "Peru"}, "correct": "B"},
-    {"question": "Who was the first man to walk on the moon?", "choices": {"A": "Buzz Aldrin", "B": "Neil Armstrong", "C": "Yuri Gagarin"}, "correct": "B"},
-    {"question": "What is the most popular fruit in the world?", "choices": {"A": "Apple", "B": "Banana", "C": "Orange"}, "correct": "B"}
-]
-
-class TriviaView(View):
-    def __init__(self, correct):
-        super().__init__()
-        options = ["A", "B", "C"]
-        random.shuffle(options)
-        for opt in options:
-            self.add_item(TriviaButton(opt, opt == correct))
-
-class TriviaButton(Button):
-    def __init__(self, label, is_correct):
-        super().__init__(label=label, style=discord.ButtonStyle.green if is_correct else discord.ButtonStyle.red)
-        self.is_correct = is_correct
-
-    async def callback(self, interaction):
-        if self.is_correct:
-            update_balance(str(interaction.user.id), 50)
-            await interaction.response.send_message(embed=create_embed("✅ Correct!", "You earned 50 coins!", discord.Color.green()), ephemeral=True)
-        else:
-            await interaction.response.send_message(embed=create_embed("❌ Wrong!", "Better luck next time."), ephemeral=True)
-
-@bot.tree.command(name="trivia", description="Answer a trivia question")
-async def trivia(interaction: discord.Interaction):
-    question = random.choice(trivia_questions)
-    choices = question["choices"]
-    correct = question["correct"]
-
-    embed = create_embed("🧠 Trivia", f"{question['question']}\n\nA) {choices['A']}\nB) {choices['B']}\nC) {choices['C']}")
-    await interaction.response.send_message(embed=embed, view=TriviaView(correct))
-
-# Math Command, Shop Command, and other existing commands would follow here...
-
-# Sync Commands with Discord
 @bot.event
 async def on_ready():
-    await bot.tree.sync()
-    print(f'We have logged in as {bot.user}')
+    print(f"Logged in as {bot.user}")
 
-bot.run(os.environ["DISCORD_TOKEN"])
+@bot.command()
+async def count(ctx, number: int):
+    if number == db["current_number"]:
+        db["current_number"] += 1
+        db["leaderboard"].setdefault(str(ctx.author.id), 0)
+        db["leaderboard"][str(ctx.author.id)] += 1
+        save_db()
+        await ctx.send(f"{number}")
+    else:
+        await ctx.send(f"{db['current_number']}")
+
+@bot.command()
+async def leaderboard(ctx):
+    sorted_leaderboard = sorted(db["leaderboard"].items(), key=lambda x: x[1], reverse=True)
+    description = ""
+    for i, (user_id, score) in enumerate(sorted_leaderboard[:10], start=1):
+        user = await bot.fetch_user(int(user_id))
+        description += f"{i}. {user.name}: {score}\n"
+    
+    embed = discord.Embed(title="Leaderboard", description=description, color=discord.Color.blue())
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def trivia(ctx):
+    question = random.choice(trivia_questions)
+    embed = discord.Embed(title="Trivia Time!", description=question["question"], color=discord.Color.green())
+    
+    for option, answer in question["choices"].items():
+        embed.add_field(name=option, value=answer, inline=False)
+    
+    message = await ctx.send(embed=embed)
+
+    def check(m):
+        return m.author == ctx.author and m.channel == ctx.channel and m.content.upper() in ["A", "B", "C"]
+
+    try:
+        guess = await bot.wait_for('message', timeout=20.0, check=check)
+    except asyncio.TimeoutError:
+        await ctx.send(f"Time's up! The correct answer was {question['correct']}.")
+        return
+
+    if guess.content.upper() == question["correct"]:
+        await ctx.send("Correct!")
+        db["economy"].setdefault(str(ctx.author.id), 0)
+        db["economy"][str(ctx.author.id)] += 10
+        save_db()
+    else:
+        await ctx.send(f"Wrong! Correct answer: {question['correct']}")
+
+@bot.command()
+async def balance(ctx):
+    balance = db["economy"].get(str(ctx.author.id), 0)
+    await ctx.send(f"You have {balance} coins.")
+
+@bot.command()
+async def addban(ctx, *, word):
+    db["banned_words"].append(word.lower())
+    save_db()
+    await ctx.send(f"Added `{word}` to banned words list.")
+
+@bot.command()
+async def banned(ctx):
+    if db["banned_words"]:
+        await ctx.send("Banned words: " + ", ".join(db["banned_words"]))
+    else:
+        await ctx.send("No banned words yet!")
+
+@bot.event
+async def on_message(message):
+    if message.author == bot.user:
+        return
+
+    for word in db["banned_words"]:
+        if word in message.content.lower():
+            await message.delete()
+            await message.channel.send(f"{message.author.mention}, that word is banned!")
+            return
+
+    await bot.process_commands(message)
+
+# Your bot token here
+bot.run("YOUR_BOT_TOKEN")
