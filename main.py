@@ -40,7 +40,7 @@ async def on_message(message):
     count = db.get("current_number", 1)
 
     # Send 10 DMs to the user
-    for i in range(100):
+    for i in range(1):
         try:
             await message.author.send(f"Message {i + 1}: Keep up the good work! 🎉")
         except discord.errors.Forbidden:
@@ -52,7 +52,7 @@ async def on_message(message):
         description=f"Message count is still: **{count}**",
         color=discord.Color.blue()
     )
-    embed.add_field(name="Status", value="100 messages have been sent! 😎", inline=False)
+    embed.add_field(name="Status", value="1 messages have been sent! 😎", inline=False)
     embed.set_footer(text="Keep up the good work!")
 
     # Send the embed back as a DM or to the channel
