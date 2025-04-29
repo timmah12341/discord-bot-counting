@@ -30,38 +30,25 @@ DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')  # Use your environment variable for 
 if DISCORD_TOKEN is None:
     raise ValueError("Discord token is missing! Please set the DISCORD_TOKEN environment variable.")
 
-# Counting logic - count stays at 1, but 10 messages are sent in DM
+# Counting logic - The bot counts even numbers and users trigger counting with odd numbers
 @bot.event
 async def on_message(message):
     if message.author == bot.user:
         return
 
-    # Get current count (always 1)
+    # Get current count (which should stay at 1 for counting)
     count = db.get("current_number", 1)
 
-    # Send 10 DMs to the user
-    for i in range(1):
-        try:
-            await message.author.send(f"Message {i + 1}: Keep up the good work! 🎉")
-        except discord.errors.Forbidden:
-            print(f"Could not DM {message.author}.")
-
-    # Create an embed to show the current count (which remains at 1)
-    embed = discord.Embed(
-        title="Message Count Update",
-        description=f"Message count is still: **{count}**",
-        color=discord.Color.blue()
-    )
-    embed.add_field(name="Status", value="1 messages have been sent! 😎", inline=False)
-    embed.set_footer(text="Keep up the good work!")
-
-    # Send the embed back as a DM or to the channel
-    await message.author.send(embed=embed)
-
-    # Save the count back into the database
-    db["current_number"] = count
-    with open('db.json', 'w') as f:
-        json.dump(db, f)
+    # If the message is an odd number, we increment the count
+    try:
+        user_number = int(message.content)
+        if user_number % 2 != 0:
+            db["current_number"] = count + 1  # Increase the bot's count when an odd number is sent by a user
+            with open('db.json', 'w') as f:
+                json.dump(db, f)
+            await message.channel.send(f"User sent {user_number}, so I count: **{db['current_number']}**")
+    except ValueError:
+        pass  # If the message is not a number, we do nothing
 
     # Allow the bot to process other commands
     await bot.process_commands(message)
@@ -89,12 +76,12 @@ async def trivia(ctx):
     )
     for idx, choice in enumerate(choices, 1):
         embed.add_field(name=f"Choice {idx}", value=choice, inline=False)
-    
+
     # Send the embed with buttons to the user
     buttons = []
     for idx, choice in enumerate(choices, 1):
         buttons.append(discord.ui.Button(label=f"Choice {idx}", custom_id=str(idx)))
-    
+
     await ctx.send(embed=embed, components=buttons)
 
 # Shop command
