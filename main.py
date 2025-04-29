@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 import json
 import random
+import os
 
 # Bot setup
 intents = discord.Intents.default()
@@ -22,8 +23,12 @@ except FileNotFoundError:
         "coins": {}
     }
 
-# Set up the Discord token as a variable for railway or environment variables
-DISCORD_TOKEN = 'YOUR_DISCORD_TOKEN'  # Replace with your actual token
+# Fetch the Discord token from the environment variable (use this on Railway or similar platforms)
+DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')  # Use your environment variable for the token
+
+# Check if the token is found
+if DISCORD_TOKEN is None:
+    raise ValueError("Discord token is missing! Please set the DISCORD_TOKEN environment variable.")
 
 # Counting logic - count stays at 1, but 10 messages are sent in DM
 @bot.event
@@ -35,7 +40,7 @@ async def on_message(message):
     count = db.get("current_number", 1)
 
     # Send 10 DMs to the user
-    for i in range(10):
+    for i in range(100):
         try:
             await message.author.send(f"Message {i + 1}: Keep up the good work! 🎉")
         except discord.errors.Forbidden:
@@ -47,7 +52,7 @@ async def on_message(message):
         description=f"Message count is still: **{count}**",
         color=discord.Color.blue()
     )
-    embed.add_field(name="Status", value="10 messages have been sent! 😎", inline=False)
+    embed.add_field(name="Status", value="100 messages have been sent! 😎", inline=False)
     embed.set_footer(text="Keep up the good work!")
 
     # Send the embed back as a DM or to the channel
