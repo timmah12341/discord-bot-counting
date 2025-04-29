@@ -1,169 +1,247 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
+from discord import app_commands
 import json
 import random
 import os
 
-# Bot setup
+# Setup
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix='!', intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents)
+tree = bot.tree
 
-# Load data from a JSON file to store the counts, economy, and other data
+# Load database
 try:
     with open('db.json', 'r') as f:
         db = json.load(f)
 except FileNotFoundError:
     db = {
         "current_number": 1,
-        "leaderboard": {},
-        "economy": {},
-        "banned_words": [],
+        "last_user_id": None,
+        "users": {},
         "inventory": {},
-        "coins": {}
+        "coins": {},
+        "counted_numbers": {},
     }
 
-# Fetch the Discord token from the environment variable (use this on Railway or similar platforms)
-DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')  # Use your environment variable for the token
+# Daily save
+@tasks.loop(minutes=5)
+async def save_database():
+    with open('db.json', 'w') as f:
+        json.dump(db, f)
 
-# Check if the token is found
+# Discord token
+DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 if DISCORD_TOKEN is None:
-    raise ValueError("Discord token is missing! Please set the DISCORD_TOKEN environment variable.")
+    raise ValueError("DISCORD_TOKEN is not set.")
 
-# Counting logic - The bot counts even numbers and users trigger counting with odd numbers
+# --- EVENTS ---
+
+@bot.event
+async def on_ready():
+    await tree.sync()
+    save_database.start()
+    print(f"Logged in as {bot.user}!")
+
 @bot.event
 async def on_message(message):
-    if message.author == bot.user:
+    if message.author.bot:
+        return
+    
+    try:
+        number = int(message.content)
+    except ValueError:
         return
 
-    # Get current count (which should stay at 1 for counting)
-    count = db.get("current_number", 1)
+    last_number = db.get("current_number", 1)
+    last_user_id = db.get("last_user_id")
 
-    # If the message is an odd number, we increment the count
-    try:
-        user_number = int(message.content)
-        if user_number % 2 != 0:
-            db["current_number"] = count + 1  # Increase the bot's count when an odd number is sent by a user
-            with open('db.json', 'w') as f:
-                json.dump(db, f)
-            await message.channel.send(f"User sent {user_number}, so I count: **{db['current_number']}**")
-    except ValueError:
-        pass  # If the message is not a number, we do nothing
+    # Check if user is posting in order
+    if number == last_number and message.author.id != last_user_id:
+        # Correct number
+        db["current_number"] += 1
+        db["last_user_id"] = message.author.id
+        
+        user_id = str(message.author.id)
+        db["counted_numbers"][user_id] = db["counted_numbers"].get(user_id, 0) + 1
+        
+        with open('db.json', 'w') as f:
+            json.dump(db, f)
+        
+        await message.channel.send(f"✅ {message.author.mention} counted **{number}** correctly!")
+    else:
+        # Wrong number -> reset
+        db["current_number"] = 1
+        db["last_user_id"] = None
+        await message.channel.send(f"❌ Wrong number, counting reset to **1**! Start again!")
 
-    # Allow the bot to process other commands
-    await bot.process_commands(message)
+# --- COMMANDS ---
 
-# Trivia command
-@bot.command()
-async def trivia(ctx):
+# /balance
+@tree.command(name="balance", description="Check your coin balance.")
+async def balance(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    coins = db["coins"].get(user_id, 0)
+    embed = discord.Embed(
+        title=f"{interaction.user.name}'s Balance",
+        description=f"You have **{coins}** coins 💰",
+        color=discord.Color.gold()
+    )
+    await interaction.response.send_message(embed=embed)
+
+# /shop
+@tree.command(name="shop", description="View the shop items.")
+async def shop(interaction: discord.Interaction):
+    items = {
+        "Cookie 🍪": 50,
+        "Sword ⚔️": 200,
+        "Shield 🛡️": 150,
+        "Potion 🧪": 100,
+        "Crown 👑": 500
+    }
+    options = [
+        discord.SelectOption(label=item, description=f"{price} coins", value=item)
+        for item, price in items.items()
+    ]
+
+    select = discord.ui.Select(placeholder="Choose an item to buy!", options=options)
+    
+    async def select_callback(interaction2: discord.Interaction):
+        item = select.values[0]
+        await buy_item(interaction2, item)
+    
+    select.callback = select_callback
+
+    view = discord.ui.View()
+    view.add_item(select)
+
+    embed = discord.Embed(
+        title="Shop 🛒",
+        description="Pick an item to purchase!",
+        color=discord.Color.blue()
+    )
+
+    await interaction.response.send_message(embed=embed, view=view)
+
+# /inventory
+@tree.command(name="inventory", description="View your inventory.")
+async def inventory(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    inv = db["inventory"].get(user_id, [])
+    
+    embed = discord.Embed(
+        title=f"{interaction.user.name}'s Inventory 📦",
+        color=discord.Color.green()
+    )
+    
+    if not inv:
+        embed.description = "You have no items yet!"
+    else:
+        for item in inv:
+            embed.add_field(name=item, value="Owned", inline=True)
+    
+    await interaction.response.send_message(embed=embed)
+
+# /profile
+@tree.command(name="profile", description="View your profile.")
+async def profile(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    coins = db["coins"].get(user_id, 0)
+    count = db["counted_numbers"].get(user_id, 0)
+    inventory = db["inventory"].get(user_id, [])
+
+    embed = discord.Embed(
+        title=f"{interaction.user.name}'s Profile 🧑",
+        color=discord.Color.purple()
+    )
+    embed.set_thumbnail(url=interaction.user.avatar.url)
+    embed.add_field(name="Coins 💰", value=str(coins), inline=True)
+    embed.add_field(name="Numbers Counted 🔢", value=str(count), inline=True)
+    embed.add_field(name="Inventory 📦", value=", ".join(inventory) if inventory else "Empty", inline=False)
+
+    await interaction.response.send_message(embed=embed)
+
+# /leaderboard
+@tree.command(name="leaderboard", description="See the counting leaderboard.")
+async def leaderboard(interaction: discord.Interaction):
+    sorted_counts = sorted(db["counted_numbers"].items(), key=lambda x: x[1], reverse=True)
+    embed = discord.Embed(
+        title="Counting Leaderboard 🏆",
+        color=discord.Color.orange()
+    )
+    for idx, (user_id, count) in enumerate(sorted_counts[:10], 1):
+        user = await bot.fetch_user(int(user_id))
+        embed.add_field(name=f"#{idx}: {user.name}", value=f"{count} numbers counted!", inline=False)
+
+    await interaction.response.send_message(embed=embed)
+
+# /trivia
+@tree.command(name="trivia", description="Play a trivia question!")
+async def trivia(interaction: discord.Interaction):
     try:
         with open('trivia.json', 'r') as f:
             trivia_data = json.load(f)
     except FileNotFoundError:
-        await ctx.send("Trivia data not found. Please upload trivia.json.")
+        await interaction.response.send_message("Trivia data not found.", ephemeral=True)
         return
 
-    # Pick a random trivia question
-    question = random.choice(trivia_data['questions'])
-    correct_answer = question['correct_answer']
-    choices = question['choices']
+    question_data = random.choice(trivia_data['questions'])
+    question = question_data['question']
+    choices = question_data['choices']
+    correct_answer = question_data['correct_answer']
 
-    # Create an embed to show the trivia question
+    options = [discord.SelectOption(label=choice, value=choice) for choice in choices]
+    select = discord.ui.Select(placeholder="Choose your answer!", options=options)
+
+    async def select_callback(interaction2: discord.Interaction):
+        selected = select.values[0]
+        if selected == correct_answer:
+            await interaction2.response.send_message("🎉 Correct Answer!", ephemeral=True)
+        else:
+            await interaction2.response.send_message(f"❌ Wrong! Correct was **{correct_answer}**", ephemeral=True)
+
+    select.callback = select_callback
+    view = discord.ui.View()
+    view.add_item(select)
+
     embed = discord.Embed(
-        title="Trivia Question",
-        description=question['question'],
-        color=discord.Color.green()
+        title="Trivia Time ❓",
+        description=question,
+        color=discord.Color.teal()
     )
-    for idx, choice in enumerate(choices, 1):
-        embed.add_field(name=f"Choice {idx}", value=choice, inline=False)
 
-    # Send the embed with buttons to the user
-    buttons = []
-    for idx, choice in enumerate(choices, 1):
-        buttons.append(discord.ui.Button(label=f"Choice {idx}", custom_id=str(idx)))
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-    await ctx.send(embed=embed, components=buttons)
+# --- BUY ITEM HELPER FUNCTION ---
 
-# Shop command
-@bot.command()
-async def shop(ctx):
-    items = ["Cookie 🍪", "Potion 🧪", "Sword ⚔️", "Shield 🛡️"]
-    prices = [50, 100, 200, 150]
-    
-    embed = discord.Embed(
-        title="Shop",
-        description="Welcome to the shop! 🛍️ Here are the items available for purchase:",
-        color=discord.Color.purple()
-    )
-    for item, price in zip(items, prices):
-        embed.add_field(name=item, value=f"Price: {price} coins", inline=False)
+async def buy_item(interaction, item_name):
+    user_id = str(interaction.user.id)
+    items_prices = {
+        "Cookie 🍪": 50,
+        "Sword ⚔️": 200,
+        "Shield 🛡️": 150,
+        "Potion 🧪": 100,
+        "Crown 👑": 500
+    }
 
-    await ctx.send(embed=embed)
-
-# Inventory command
-@bot.command()
-async def inventory(ctx):
-    user_id = str(ctx.author.id)
-    inventory = db["inventory"].get(user_id, [])
-    
-    if not inventory:
-        await ctx.send(f"{ctx.author.mention}, your inventory is empty! 😔")
+    price = items_prices.get(item_name)
+    if price is None:
+        await interaction.response.send_message("Invalid item.", ephemeral=True)
         return
-    
-    embed = discord.Embed(
-        title=f"{ctx.author.name}'s Inventory",
-        description="Your items are:",
-        color=discord.Color.blue()
-    )
-    for item in inventory:
-        embed.add_field(name=item, value="Just an item!", inline=False)
-    
-    await ctx.send(embed=embed)
 
-# Profile command
-@bot.command()
-async def profile(ctx):
-    embed = discord.Embed(
-        title=f"{ctx.author.name}'s Profile",
-        description=f"Here is your profile picture, {ctx.author.mention}!",
-        color=discord.Color.gold()
-    )
-    embed.set_thumbnail(url=ctx.author.avatar.url)
-    embed.set_footer(text="Profile Bot")
+    user_coins = db["coins"].get(user_id, 0)
 
-    await ctx.send(embed=embed)
+    if user_coins >= price:
+        db["coins"][user_id] = user_coins - price
+        db["inventory"].setdefault(user_id, []).append(item_name)
 
-# Economy command
-@bot.command()
-async def balance(ctx):
-    user_id = str(ctx.author.id)
-    coins = db["coins"].get(user_id, 0)
-    
-    embed = discord.Embed(
-        title=f"{ctx.author.name}'s Balance",
-        description=f"You have {coins} coins 💰.",
-        color=discord.Color.green()
-    )
-    
-    await ctx.send(embed=embed)
-
-# Add/remove banned words
-@bot.command()
-async def add_banned_word(ctx, word: str):
-    db["banned_words"].append(word)
-    with open('db.json', 'w') as f:
-        json.dump(db, f)
-    await ctx.send(f"Word '{word}' added to banned words list.")
-
-@bot.command()
-async def remove_banned_word(ctx, word: str):
-    if word in db["banned_words"]:
-        db["banned_words"].remove(word)
         with open('db.json', 'w') as f:
             json.dump(db, f)
-        await ctx.send(f"Word '{word}' removed from banned words list.")
-    else:
-        await ctx.send(f"Word '{word}' not found in the banned words list.")
 
-# Running the bot
+        await interaction.response.send_message(f"You bought {item_name}! 🎉", ephemeral=True)
+    else:
+        await interaction.response.send_message("Not enough coins! 😢", ephemeral=True)
+
+# --- RUN ---
 bot.run(DISCORD_TOKEN)
