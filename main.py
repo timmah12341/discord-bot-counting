@@ -1,3 +1,4 @@
+import os
 import discord
 from discord.ext import commands
 import json
@@ -8,146 +9,125 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='/', intents=intents)
 
-# Load database
-def load_db():
-    try:
-        with open('db.json', 'r') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {
-            "current_number": 1,
-            "leaderboard": {},
-            "economy": {},
-            "banned_words": [],
-            "inventory": {},
-            "trivia_questions": []
-        }
+# Load your token from the environment variable
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+if not DISCORD_TOKEN:
+    raise ValueError("No Discord token found in environment variables!")
 
-db = load_db()
+@bot.event
+async def on_ready():
+    print(f'Logged in as {bot.user}')
 
-# Load trivia questions from trivia.json
-def load_trivia():
-    try:
-        with open('trivia.json', 'r') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return []
-
-db['trivia_questions'] = load_trivia()  # Load trivia questions from the file
-
-# Save database
-def save_db():
-    with open('db.json', 'w') as f:
-        json.dump(db, f, indent=4)
-
-# Command: /start
+# Example command: Hello command
 @bot.command()
-async def start(ctx):
-    db['economy'][str(ctx.author.id)] = {'coins': 0}
-    save_db()
-    await ctx.send(f"Welcome {ctx.author.name}, your account has been set up!")
+async def hello(ctx):
+    await ctx.send('Hello!')
 
-# Command: /counting
-@bot.command()
-async def counting(ctx, number: int):
-    if number != db['current_number']:
-        await ctx.send(f"Wrong number! Expected: {db['current_number']}")
-    else:
-        db['current_number'] += 1
-        save_db()
-        await ctx.send(f"Correct! The next number is {db['current_number']}.")
-
-# Command: /trivia
+# Example trivia command with trivia.json
 @bot.command()
 async def trivia(ctx):
-    if not db['trivia_questions']:
-        await ctx.send("No trivia questions available!")
-        return
+    # Load trivia questions from trivia.json
+    with open('trivia.json', 'r') as file:
+        trivia_data = json.load(file)
 
-    question = random.choice(db['trivia_questions'])
-    embed = discord.Embed(title="Trivia Question", description=question["question"], color=discord.Color.blue())
-    
-    for choice, answer in question["choices"].items():
-        embed.add_field(name=choice, value=answer, inline=False)
+    # Select a random trivia question
+    question = random.choice(trivia_data)
+    choices = question["choices"]
 
-    # Send trivia question privately
+    # Send the trivia question as an embed
+    embed = discord.Embed(
+        title="Trivia Question",
+        description=question["question"],
+        color=discord.Color.blue()
+    )
+
+    for key, value in choices.items():
+        embed.add_field(name=key, value=value, inline=False)
+
+    # Send a private message to the user with the trivia question
     await ctx.author.send(embed=embed)
-    await ctx.send("The trivia question has been sent to your DM!")
 
-# Command: /profile
+    # Wait for the user's response (mockup: simulating the answer)
+    def check(msg):
+        return msg.author == ctx.author and msg.content.upper() in choices.keys()
+
+    try:
+        response = await bot.wait_for('message', check=check, timeout=30)
+        if response.content.upper() == question["correct"]:
+            await ctx.author.send(f'Correct! 🎉 The answer is **{response.content.upper()}**')
+        else:
+            await ctx.author.send(f'Incorrect! 😢 The correct answer was **{question["correct"]}**')
+    except asyncio.TimeoutError:
+        await ctx.author.send("You took too long to answer. Please try again later!")
+
+# Example /inventory command
 @bot.command()
-async def profile(ctx):
-    embed = discord.Embed(title=f"{ctx.author.name}'s Profile", color=discord.Color.green())
-    embed.set_thumbnail(url=ctx.author.avatar.url)
-    embed.add_field(name="Coins", value=db['economy'][str(ctx.author.id)]['coins'], inline=False)
-    
-    # Add other profile details if necessary
+async def inventory(ctx):
+    # Check if user has an inventory in the database (mockup)
+    user_id = str(ctx.author.id)
+    try:
+        with open('db.json', 'r') as db_file:
+            db_data = json.load(db_file)
 
-    await ctx.send(embed=embed)
+        user_inventory = db_data.get("inventory", {}).get(user_id, [])
+        if user_inventory:
+            await ctx.send(f"Your inventory: {', '.join(user_inventory)}")
+        else:
+            await ctx.send("You don't have any items in your inventory.")
+    except FileNotFoundError:
+        await ctx.send("Database not found, please try again later!")
 
-# Command: /shop
+# Example /shop command
 @bot.command()
 async def shop(ctx):
-    embed = discord.Embed(title="Shop", description="Here are the items you can buy:", color=discord.Color.gold())
-    embed.add_field(name="🍪 Cookie", value="Price: 50 coins. *Nom Nom* 🍪", inline=False)
-    embed.add_field(name="🎩 Top Hat", value="Price: 100 coins.", inline=False)
-    embed.add_field(name="💎 Diamond", value="Price: 500 coins.", inline=False)
-    
+    shop_items = ["Cookie 🍪", "Potion 🧪", "Sword ⚔️", "Shield 🛡️"]
+    embed = discord.Embed(
+        title="Shop",
+        description="Welcome to the shop! Choose an item to buy.",
+        color=discord.Color.green()
+    )
+
+    for item in shop_items:
+        embed.add_field(name=item, value=f"Price: 100 coins", inline=False)
+
     await ctx.send(embed=embed)
 
-# Command: /buy
 @bot.command()
 async def buy(ctx, item: str):
-    items = {"cookie": 50, "tophat": 100, "diamond": 500}
-    
-    if item.lower() not in items:
-        await ctx.send("Item not found!")
-        return
-    
-    price = items[item.lower()]
+    # Check if user has enough coins (mockup: we'll just deduct from their balance)
     user_id = str(ctx.author.id)
-    
-    if db['economy'].get(user_id, {}).get('coins', 0) < price:
-        await ctx.send("You don't have enough coins!")
-        return
-    
-    db['economy'][user_id]['coins'] -= price
-    db['inventory'].setdefault(user_id, []).append(item.lower())
-    save_db()
-    
-    await ctx.send(f"{ctx.author.name} bought a {item} for {price} coins! 🎉")
+    try:
+        with open('db.json', 'r') as db_file:
+            db_data = json.load(db_file)
 
-# Command: /use
-@bot.command()
-async def use(ctx, item: str):
-    user_id = str(ctx.author.id)
-    
-    if item.lower() not in db['inventory'].get(user_id, []):
-        await ctx.send(f"You don't have a {item}!")
-        return
+        user_data = db_data.get("economy", {}).get(user_id, {"coins": 0})
 
-    db['inventory'][user_id].remove(item.lower())
-    save_db()
-    
-    if item.lower() == "cookie":
-        await ctx.send(f"*Nom Nom* {ctx.author.name} ate a cookie! 🍪")
-    elif item.lower() == "tophat":
-        await ctx.send(f"{ctx.author.name} put on a top hat! 🎩")
-    elif item.lower() == "diamond":
-        await ctx.send(f"{ctx.author.name} used a diamond! 💎")
-    else:
-        await ctx.send(f"{ctx.author.name} used {item}!")
+        item_prices = {"Cookie 🍪": 100, "Potion 🧪": 200, "Sword ⚔️": 300, "Shield 🛡️": 400}
 
-# Command: /leaderboard
-@bot.command()
-async def leaderboard(ctx):
-    leaderboard = sorted(db['economy'].items(), key=lambda x: x[1]['coins'], reverse=True)
-    embed = discord.Embed(title="Leaderboard", color=discord.Color.orange())
-    
-    for idx, (user_id, data) in enumerate(leaderboard[:10], 1):
-        user = await bot.fetch_user(int(user_id))
-        embed.add_field(name=f"{idx}. {user.name}", value=f"{data['coins']} coins", inline=False)
-    
-    await ctx.send(embed=embed)
+        if item in item_prices:
+            if user_data["coins"] >= item_prices[item]:
+                user_data["coins"] -= item_prices[item]
+                db_data["economy"][user_id] = user_data
 
-bot.run('DISCORD_TOKEN')  # Replace with your actual token or use environment variable
+                # Add item to the user's inventory
+                if "inventory" not in db_data:
+                    db_data["inventory"] = {}
+
+                if user_id not in db_data["inventory"]:
+                    db_data["inventory"][user_id] = []
+
+                db_data["inventory"][user_id].append(item)
+
+                with open('db.json', 'w') as db_file:
+                    json.dump(db_data, db_file)
+
+                await ctx.send(f'You bought {item} successfully! 🛍️')
+            else:
+                await ctx.send(f'You don\'t have enough coins to buy {item}.')
+        else:
+            await ctx.send('Item not found in the shop.')
+    except FileNotFoundError:
+        await ctx.send("Database not found, please try again later!")
+
+# Run the bot using the token from the environment variable
+bot.run(DISCORD_TOKEN)
