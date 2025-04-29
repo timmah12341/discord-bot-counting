@@ -1,201 +1,177 @@
-import os
 import discord
-import json
 from discord.ext import commands
-from discord.ui import Button, View
+import json
+import random
 
-# Setting up the bot with the required intents
+# Bot setup
 intents = discord.Intents.default()
-intents.message_content = True  # To read the message content
+intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# Initialize the count (global count variable) and database
-count = 0
+# Load data from a JSON file to store the counts, economy, and other data
+try:
+    with open('db.json', 'r') as f:
+        db = json.load(f)
+except FileNotFoundError:
+    db = {
+        "current_number": 1,
+        "leaderboard": {},
+        "economy": {},
+        "banned_words": [],
+        "inventory": {},
+        "coins": {}
+    }
 
-# Load trivia questions from trivia.json
-def load_trivia():
-    try:
-        with open('trivia.json', 'r') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return []
+# Set up the Discord token as a variable for railway or environment variables
+DISCORD_TOKEN = 'YOUR_DISCORD_TOKEN'  # Replace with your actual token
 
-trivia_data = load_trivia()
-
-# Load database (db.json)
-def load_db():
-    try:
-        with open('db.json', 'r') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
-
-# Initialize the database
-db = load_db()
-
-# Event when the bot is ready
-@bot.event
-async def on_ready():
-    print(f'Logged in as {bot.user}')
-
-# Event when a new message is sent in the chat
+# Counting logic - count stays at 1, but 10 messages are sent in DM
 @bot.event
 async def on_message(message):
-    global count
-
     if message.author == bot.user:
         return
 
-    # Increment the message count for each new message
-    count += 1
+    # Get current count (always 1)
+    count = db.get("current_number", 1)
 
-    # Create an embed response with style and emojis
+    # Send 10 DMs to the user
+    for i in range(10):
+        try:
+            await message.author.send(f"Message {i + 1}: Keep up the good work! 🎉")
+        except discord.errors.Forbidden:
+            print(f"Could not DM {message.author}.")
+
+    # Create an embed to show the current count (which remains at 1)
     embed = discord.Embed(
         title="Message Count Update",
-        description=f"Message count is now: **{count}**",
+        description=f"Message count is still: **{count}**",
         color=discord.Color.blue()
     )
-    
-    if count % 2 != 0:
-        embed.add_field(name="Status", value=f"Odd count! 🎉", inline=False)
-        embed.set_footer(text="Keep the messages coming!")
-    else:
-        embed.add_field(name="Status", value=f"Even count! 😎", inline=False)
-        embed.set_footer(text="Great job, team!")
+    embed.add_field(name="Status", value="10 messages have been sent! 😎", inline=False)
+    embed.set_footer(text="Keep up the good work!")
 
-    # Send the embed only to the person who sent the message
+    # Send the embed back as a DM or to the channel
     await message.author.send(embed=embed)
 
-    # Allow the bot to process other commands (if any)
-    await bot.process_commands(message)
+    # Save the count back into the database
+    db["current_number"] = count
+    with open('db.json', 'w') as f:
+        json.dump(db, f)
 
-# Command to view the user's profile
-@bot.command()
-async def viewprofile(ctx):
-    user = ctx.author
-    embed = discord.Embed(title=f"{user.name}'s Profile", color=discord.Color.green())
-    embed.set_thumbnail(url=user.avatar.url)
-    embed.add_field(name="Username", value=user.name, inline=True)
-    embed.add_field(name="ID", value=user.id, inline=True)
-    embed.set_footer(text="This is your profile!")
-    await ctx.send(embed=embed)
+    # Allow the bot to process other commands
+    await bot.process_commands(message)
 
 # Trivia command
 @bot.command()
 async def trivia(ctx):
-    if not trivia_data:
-        await ctx.send("Sorry, no trivia questions available!")
+    try:
+        with open('trivia.json', 'r') as f:
+            trivia_data = json.load(f)
+    except FileNotFoundError:
+        await ctx.send("Trivia data not found. Please upload trivia.json.")
         return
 
-    question = trivia_data[0]  # Take the first question from the list for simplicity
-    choices = question["choices"]
+    # Pick a random trivia question
+    question = random.choice(trivia_data['questions'])
+    correct_answer = question['correct_answer']
+    choices = question['choices']
+
+    # Create an embed to show the trivia question
     embed = discord.Embed(
-        title=question["question"],
-        color=discord.Color.orange()
+        title="Trivia Question",
+        description=question['question'],
+        color=discord.Color.green()
     )
-
-    # Adding choices to embed
-    for key, value in choices.items():
-        embed.add_field(name=f"{key}", value=value, inline=False)
-
-    # Create buttons for user to select
-    buttons = [
-        Button(label="A", custom_id="A"),
-        Button(label="B", custom_id="B"),
-        Button(label="C", custom_id="C")
-    ]
-
-    # Add the buttons to the view
-    view = View(timeout=15)
-    for button in buttons:
-        view.add_item(button)
-
-    # Send the trivia question
-    await ctx.send(embed=embed, view=view)
-
-    # Wait for the response and check if the answer is correct
-    def check(interaction):
-        return interaction.user == ctx.author and interaction.data["custom_id"] in choices
-
-    try:
-        interaction = await bot.wait_for("interaction", timeout=15.0, check=check)
-        correct_answer = question["correct"]
-        selected = interaction.data["custom_id"]
-
-        # Respond based on the selected answer
-        if selected == correct_answer:
-            response = "Correct! 🎉"
-        else:
-            response = f"Oops! The correct answer was {correct_answer}. 😓"
-
-        await interaction.response.send_message(response, ephemeral=True)
-    except TimeoutError:
-        await ctx.send("Time's up! No answer received in time.")
+    for idx, choice in enumerate(choices, 1):
+        embed.add_field(name=f"Choice {idx}", value=choice, inline=False)
+    
+    # Send the embed with buttons to the user
+    buttons = []
+    for idx, choice in enumerate(choices, 1):
+        buttons.append(discord.ui.Button(label=f"Choice {idx}", custom_id=str(idx)))
+    
+    await ctx.send(embed=embed, components=buttons)
 
 # Shop command
 @bot.command()
 async def shop(ctx):
-    user_id = str(ctx.author.id)
-    if user_id not in db:
-        db[user_id] = {"coins": 100, "items": []}  # Default coins if new user
-
-    user_data = db[user_id]
-    coins = user_data["coins"]
-    items = user_data["items"]
-
+    items = ["Cookie 🍪", "Potion 🧪", "Sword ⚔️", "Shield 🛡️"]
+    prices = [50, 100, 200, 150]
+    
     embed = discord.Embed(
-        title=f"{ctx.author.name}'s Shop",
+        title="Shop",
+        description="Welcome to the shop! 🛍️ Here are the items available for purchase:",
         color=discord.Color.purple()
     )
-    embed.add_field(name="Coins", value=f"💰 {coins}", inline=False)
-    embed.add_field(name="Items", value=f"{', '.join(items) if items else 'None'}", inline=False)
+    for item, price in zip(items, prices):
+        embed.add_field(name=item, value=f"Price: {price} coins", inline=False)
 
-    embed.add_field(name="Items for Sale", value="🍪 Cookie: 50 coins", inline=False)
-    embed.add_field(name="Use `/buy cookie` to purchase", value="After purchasing, use `/use cookie` to eat!", inline=False)
+    await ctx.send(embed=embed)
+
+# Inventory command
+@bot.command()
+async def inventory(ctx):
+    user_id = str(ctx.author.id)
+    inventory = db["inventory"].get(user_id, [])
+    
+    if not inventory:
+        await ctx.send(f"{ctx.author.mention}, your inventory is empty! 😔")
+        return
+    
+    embed = discord.Embed(
+        title=f"{ctx.author.name}'s Inventory",
+        description="Your items are:",
+        color=discord.Color.blue()
+    )
+    for item in inventory:
+        embed.add_field(name=item, value="Just an item!", inline=False)
     
     await ctx.send(embed=embed)
 
-# Buy command
+# Profile command
 @bot.command()
-async def buy(ctx, item: str):
-    user_id = str(ctx.author.id)
-    if user_id not in db:
-        db[user_id] = {"coins": 100, "items": []}
+async def profile(ctx):
+    embed = discord.Embed(
+        title=f"{ctx.author.name}'s Profile",
+        description=f"Here is your profile picture, {ctx.author.mention}!",
+        color=discord.Color.gold()
+    )
+    embed.set_thumbnail(url=ctx.author.avatar.url)
+    embed.set_footer(text="Profile Bot")
 
-    user_data = db[user_id]
-    coins = user_data["coins"]
-    items = user_data["items"]
+    await ctx.send(embed=embed)
 
-    if item.lower() == "cookie" and coins >= 50:
-        user_data["coins"] -= 50
-        user_data["items"].append("Cookie")
-        await ctx.send(f"🎉 You have bought a Cookie! 🍪 Enjoy!")
-    else:
-        await ctx.send("❌ You don't have enough coins or the item is unavailable.")
-
-# Use command for items (cookie example)
+# Economy command
 @bot.command()
-async def use(ctx, item: str):
+async def balance(ctx):
     user_id = str(ctx.author.id)
-    if user_id not in db or item.lower() not in db[user_id]["items"]:
-        await ctx.send("❌ You don't have that item!")
-        return
+    coins = db["coins"].get(user_id, 0)
+    
+    embed = discord.Embed(
+        title=f"{ctx.author.name}'s Balance",
+        description=f"You have {coins} coins 💰.",
+        color=discord.Color.green()
+    )
+    
+    await ctx.send(embed=embed)
 
-    if item.lower() == "cookie":
-        db[user_id]["items"].remove("Cookie")
-        await ctx.send("🍪 *Nom nom* You ate a cookie and feel happy! 🎉")
-    else:
-        await ctx.send("❌ That item is not usable.")
-
-# Save database to file on shutdown
-@bot.event
-async def on_close():
+# Add/remove banned words
+@bot.command()
+async def add_banned_word(ctx, word: str):
+    db["banned_words"].append(word)
     with open('db.json', 'w') as f:
         json.dump(db, f)
+    await ctx.send(f"Word '{word}' added to banned words list.")
 
-# Run the bot using the token from an environment variable
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-if not DISCORD_TOKEN:
-    raise ValueError("No Discord token found in environment variables!")
+@bot.command()
+async def remove_banned_word(ctx, word: str):
+    if word in db["banned_words"]:
+        db["banned_words"].remove(word)
+        with open('db.json', 'w') as f:
+            json.dump(db, f)
+        await ctx.send(f"Word '{word}' removed from banned words list.")
+    else:
+        await ctx.send(f"Word '{word}' not found in the banned words list.")
 
+# Running the bot
 bot.run(DISCORD_TOKEN)
