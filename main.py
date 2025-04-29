@@ -150,4 +150,4 @@ async def leaderboard(ctx):
     
     await ctx.send(embed=embed)
 
-bot.run('BOT_TOKEN')  # Replace with your actual token or use environment variable
+bot.run('DISCORD_TOKEN')  # Replace with your actual token or use environment variable
