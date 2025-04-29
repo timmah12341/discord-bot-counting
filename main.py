@@ -1,194 +1,208 @@
 import discord
 from discord.ext import commands, tasks
+import json
+import random
+import os
+from datetime import datetime
 from discord import app_commands
-import json, os, random, math
-from datetime import datetime, timedelta
 
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
-tree = bot.tree
+intents.members = True
 
-DATA_FILE = "db.json"
-TRIVIA_FILE = "trivia.json"
-CHANNEL_ID = 1366574260554043503
+bot = commands.Bot(command_prefix='/', intents=intents)
 
-def load_data():
-    try:
-        with open(DATA_FILE, "r") as f:
-            return json.load(f)
-    except:
-        return {}
+# Load the token from the environment
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 
-def save_data(data):
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f, indent=4)
+# Load the database
+if not os.path.exists('db.json'):
+    with open('db.json', 'w') as db:
+        json.dump({}, db)
 
-data = load_data()
+# Load trivia questions
+if not os.path.exists('trivia.json'):
+    with open('trivia.json', 'w') as trivia_file:
+        json.dump([{
+            "question": "What is the capital of France?",
+            "choices": {"A": "Paris", "B": "London", "C": "Rome"},
+            "correct": "A"
+        }], trivia_file)
 
-def get_user(user_id):
-    if str(user_id) not in data:
-        data[str(user_id)] = {
-            "balance": 0,
-            "count": 0,
-            "inventory": [],
-            "last_daily": "2000-01-01"
-        }
-    return data[str(user_id)]
+with open('db.json', 'r') as f:
+    db = json.load(f)
+
+with open('trivia.json', 'r') as f:
+    trivia = json.load(f)
+
+# Load roles
+SHOP_SEARCHER_ROLE = "Shop Searcher"
 
 @bot.event
 async def on_ready():
-    await tree.sync()
-    print(f"Logged in as {bot.user}")
+    print(f'Logged in as {bot.user}')
 
 @bot.event
 async def on_message(message):
-    if message.author.bot or message.channel.id != CHANNEL_ID:
+    if message.author == bot.user:
         return
+    
+    # Make sure the bot only responds in the allowed channel
+    if message.channel.id != 1366574260554043503:
+        return
+    
+    # Counting system (message counting)
+    if message.content.isdigit():
+        num = int(message.content)
+        if num % 2 != 0:
+            await message.channel.send(str(num + 1))
+    
+    # Update balance for each user
+    if message.author.id not in db:
+        db[message.author.id] = {
+            "balance": 0,
+            "inventory": [],
+            "counted": 0
+        }
+    
+    db[message.author.id]['counted'] += 1
+    with open('db.json', 'w') as f:
+        json.dump(db, f)
 
-    user = get_user(message.author.id)
-    content = message.content.lower().replace(" ", "")
-    try:
-        user_input = eval(content, {"__builtins__": {}}, math.__dict__)
-        if isinstance(user_input, (int, float)):
-            if int(user_input) % 2 == 1:
-                expected = user["count"] * 2 + 1
-                if int(user_input) == expected:
-                    user["count"] += 1
-                    save_data(data)
-                    await message.channel.send(embed=discord.Embed(
-                        title="Counting!",
-                        description=f"You said **{int(user_input)}**\nI say **{int(user_input)+1}**!",
-                        color=discord.Color.green()
-                    ))
-                else:
-                    user["count"] = 0
-                    save_data(data)
-                    await message.channel.send(embed=discord.Embed(
-                        title="Oops!",
-                        description=f"Wrong number! Restarting count.",
-                        color=discord.Color.red()
-                    ))
-    except:
-        pass
     await bot.process_commands(message)
 
-@tree.command(name="balance")
-async def balance(interaction: discord.Interaction):
-    user = get_user(interaction.user.id)
-    embed = discord.Embed(title="Your Balance", description=f"You have **{user['balance']}** coins!", color=0xFFD700)
-    await interaction.response.send_message(embed=embed)
+@bot.command()
+async def balance(ctx):
+    """Shows your balance."""
+    user = ctx.author
+    if user.id not in db:
+        db[user.id] = {"balance": 0, "inventory": [], "counted": 0}
+    
+    balance = db[user.id]["balance"]
+    await ctx.send(f"{user.mention} Your current balance is: {balance} coins.")
 
-@tree.command(name="daily")
-async def daily(interaction: discord.Interaction):
-    user = get_user(interaction.user.id)
-    last_claim = datetime.strptime(user["last_daily"], "%Y-%m-%d")
-    if datetime.utcnow().date() > last_claim.date():
-        user["balance"] += 100
-        user["last_daily"] = datetime.utcnow().strftime("%Y-%m-%d")
-        save_data(data)
-        await interaction.response.send_message(embed=discord.Embed(
-            title="Daily Reward",
-            description="You got **100 coins**!",
-            color=discord.Color.blue()
-        ))
-    else:
-        await interaction.response.send_message(embed=discord.Embed(
-            title="Already Claimed",
-            description="Come back tomorrow!",
-            color=discord.Color.red()
-        ))
+@bot.command()
+async def shop(ctx):
+    """Shows the shop items."""
+    items = {
+        "🍪 Cookie": {"price": 50, "description": "A delicious cookie! *nom nom*"},
+        "🔮 Magic Wand": {"price": 100, "description": "A wand that grants random powers."},
+        "❓ a mystery ❓": {"price": 0, "description": "A mysterious item that grants the 'Shop Searcher' role!"}
+    }
+    
+    embed = discord.Embed(title="Shop", description="Welcome to the shop! Here are the items you can buy:")
+    for item, details in items.items():
+        embed.add_field(name=item, value=f"Price: {details['price']} coins\nDescription: {details['description']}", inline=False)
+    
+    await ctx.send(embed=embed)
 
-@tree.command(name="leaderboard")
-async def leaderboard(interaction: discord.Interaction):
-    leaderboard_data = sorted(data.items(), key=lambda x: x[1].get("count", 0), reverse=True)
-    desc = ""
-    for i, (uid, udata) in enumerate(leaderboard_data[:10]):
-        user = await bot.fetch_user(int(uid))
-        desc += f"**{i+1}.** {user.name} — {udata.get('count', 0)} counts\n"
-    await interaction.response.send_message(embed=discord.Embed(title="Leaderboard", description=desc, color=0x00FFFF))
+@bot.command()
+async def buy(ctx, item_name):
+    """Buy an item from the shop."""
+    user = ctx.author
+    if user.id not in db:
+        db[user.id] = {"balance": 0, "inventory": [], "counted": 0}
 
-@tree.command(name="shop")
-async def shop(interaction: discord.Interaction):
-    embed = discord.Embed(title="Shop", description="Use `/buy item_name` to purchase!", color=0x8A2BE2)
-    embed.add_field(name="cookie", value="Cost: 50 coins — *nom nom*", inline=False)
-    embed.add_field(name="❓ a mystery ❓", value="Cost: 0 coins — Gives role `shop searcher`", inline=False)
-    await interaction.response.send_message(embed=embed)
+    items = {
+        "🍪 Cookie": {"price": 50, "description": "A delicious cookie! *nom nom*"},
+        "🔮 Magic Wand": {"price": 100, "description": "A wand that grants random powers."},
+        "❓ a mystery ❓": {"price": 0, "description": "A mysterious item that grants the 'Shop Searcher' role!"}
+    }
 
-@tree.command(name="buy")
-@app_commands.describe(item="Item name to buy")
-async def buy(interaction: discord.Interaction, item: str):
-    user = get_user(interaction.user.id)
-    item = item.lower()
-    if item == "cookie":
-        if user["balance"] >= 50:
-            user["balance"] -= 50
-            user["inventory"].append("cookie")
-            save_data(data)
-            await interaction.response.send_message(embed=discord.Embed(
-                title="Yum!",
-                description="You bought a **cookie**! *nom nom*",
-                color=0xFF69B4
-            ))
-        else:
-            await interaction.response.send_message("Not enough coins!")
-    elif item == "❓ a mystery ❓":
-        guild = interaction.guild
-        role = discord.utils.get(guild.roles, name="shop searcher")
+    if item_name not in items:
+        await ctx.send("Item not found in the shop.")
+        return
+
+    item = items[item_name]
+    
+    # Check if the user has enough balance
+    if db[user.id]["balance"] < item["price"]:
+        await ctx.send(f"{user.mention}, you do not have enough coins for this item.")
+        return
+    
+    # Deduct the coins and add to the inventory
+    db[user.id]["balance"] -= item["price"]
+    db[user.id]["inventory"].append(item_name)
+    
+    if item_name == "❓ a mystery ❓":
+        # Grant the Shop Searcher role
+        role = discord.utils.get(user.guild.roles, name=SHOP_SEARCHER_ROLE)
         if role:
-            await interaction.user.add_roles(role)
-            await interaction.response.send_message("You received the **shop searcher** role!")
-    else:
-        await interaction.response.send_message("Item not found!")
+            await user.add_roles(role)
+            await ctx.send(f"{user.mention}, you have received the {SHOP_SEARCHER_ROLE} role!")
+        else:
+            await ctx.send(f"Role {SHOP_SEARCHER_ROLE} not found on this server.")
+    
+    with open('db.json', 'w') as f:
+        json.dump(db, f)
 
-@tree.command(name="inventory")
-async def inventory(interaction: discord.Interaction):
-    user = get_user(interaction.user.id)
-    inv = user["inventory"]
-    embed = discord.Embed(title="Inventory", description="\n".join(inv) if inv else "Empty", color=0xFFFFFF)
-    await interaction.response.send_message(embed=embed)
+    await ctx.send(f"{user.mention} successfully bought {item_name}!")
 
-@tree.command(name="profile")
-async def profile(interaction: discord.Interaction):
-    user = get_user(interaction.user.id)
-    embed = discord.Embed(
-        title=f"{interaction.user.name}'s Profile",
-        description=f"**Balance:** {user['balance']} coins\n**Counted:** {user['count']} numbers",
-        color=0xADD8E6
-    )
-    embed.set_thumbnail(url=interaction.user.display_avatar.url)
-    await interaction.response.send_message(embed=embed)
+@bot.command()
+async def profile(ctx):
+    """Shows your profile with balance, items, and counted numbers."""
+    user = ctx.author
+    if user.id not in db:
+        db[user.id] = {"balance": 0, "inventory": [], "counted": 0}
+    
+    balance = db[user.id]["balance"]
+    inventory = ', '.join(db[user.id]["inventory"]) if db[user.id]["inventory"] else "No items"
+    counted = db[user.id]["counted"]
+    
+    embed = discord.Embed(title=f"{user.name}'s Profile", description=f"Here is your profile:")
+    embed.set_thumbnail(url=user.avatar.url)
+    embed.add_field(name="Balance", value=f"{balance} coins")
+    embed.add_field(name="Inventory", value=inventory)
+    embed.add_field(name="Total Numbers Counted", value=str(counted))
 
-@tree.command(name="trivia")
-async def trivia(interaction: discord.Interaction):
-    with open(TRIVIA_FILE, "r") as f:
-        trivia_list = json.load(f)
-    q = random.choice(trivia_list)
-    choices = q["choices"]
+    await ctx.send(embed=embed)
 
-    class TriviaButton(discord.ui.Button):
-        def __init__(self, label, correct):
-            style = discord.ButtonStyle.gray
-            super().__init__(label=label, style=style)
-            self.correct = correct
+@bot.command()
+async def leaderboard(ctx):
+    """Shows the leaderboard of top counters."""
+    sorted_users = sorted(db.items(), key=lambda x: x[1]['counted'], reverse=True)
+    embed = discord.Embed(title="Leaderboard", description="Here are the top counters:")
+    
+    for i, (user_id, data) in enumerate(sorted_users[:10], 1):
+        user = await bot.fetch_user(user_id)
+        embed.add_field(name=f"{i}. {user.name}", value=f"Counted: {data['counted']}", inline=False)
+    
+    await ctx.send(embed=embed)
 
-        async def callback(self, i):
-            correct = q["correct"]
-            result = "Correct!" if self.label == correct else f"Wrong! Correct was **{correct}**: {choices[correct]}"
-            if self.label == correct:
-                u = get_user(i.user.id)
-                if "trivia" not in u:
-                    u["balance"] += 20
-                    u["trivia"] = True
-                    save_data(data)
-            await i.response.edit_message(embed=discord.Embed(title="Trivia Result", description=result, color=0x00FF00), view=None)
+@bot.command()
+async def trivia(ctx):
+    """Starts a trivia question."""
+    question_data = random.choice(trivia)
+    question = question_data["question"]
+    choices = question_data["choices"]
+    correct_answer = question_data["correct"]
+    
+    buttons = [
+        discord.ui.Button(label=choices["A"], custom_id="A"),
+        discord.ui.Button(label=choices["B"], custom_id="B"),
+        discord.ui.Button(label=choices["C"], custom_id="C")
+    ]
+    
+    async def button_callback(interaction):
+        if interaction.user.id == ctx.author.id:
+            if interaction.custom_id == correct_answer:
+                await interaction.response.send_message("Correct answer!", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"Wrong answer! The correct answer was {choices[correct_answer]}", ephemeral=True)
+            # Allow another question button after answering
+            another_button = discord.ui.Button(label="Another Question", custom_id="another_question")
+            await interaction.response.send_message("Click below for another question.", components=[another_button])
+    
+    # Send the trivia question
+    embed = discord.Embed(title="Trivia Time!", description=question)
+    for choice, answer in choices.items():
+        embed.add_field(name=choice, value=answer, inline=False)
+    
+    await ctx.send(embed=embed, components=[buttons])
 
-    view = discord.ui.View()
-    for key in choices:
-        view.add_item(TriviaButton(label=key, correct=(key == q["correct"])))
+    for button in buttons:
+        button.callback = button_callback
 
-    embed = discord.Embed(title="Trivia Time!", description=q["question"], color=0xFFA500)
-    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    await ctx.send(embed=embed)
 
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 bot.run(DISCORD_TOKEN)
