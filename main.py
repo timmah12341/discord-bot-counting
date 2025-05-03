@@ -1,188 +1,169 @@
 import discord
 from discord.ext import commands, tasks
-from discord import app_commands
+from discord.ui import Button, View
 import json
 import os
-import asyncio
-import math
+from dotenv import load_dotenv
 import random
-import time
-from datetime import datetime, timedelta
+import math
+import asyncio
 
-intents = discord.Intents.all()
-bot = commands.Bot(command_prefix="!", intents=intents)
-tree = bot.tree
+# Load environment variables
+load_dotenv()
+TOKEN = os.getenv("DISCORD_TOKEN")
 
-db_file = "db.json"
-trivia_file = "trivia.json"
+# Bot Setup
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix='/', intents=intents)
+
+# Database File
+db_path = "db.json"
+if not os.path.exists(db_path):
+    with open(db_path, 'w') as f:
+        json.dump({}, f)
+
+# Helper to load DB
+def load_db():
+    with open(db_path, 'r') as f:
+        return json.load(f)
+
+# Helper to save DB
+def save_db(data):
+    with open(db_path, 'w') as f:
+        json.dump(data, f, indent=4)
+
+# Load trivia questions
+with open("trivia.json", "r") as file:
+    trivia_data = json.load(file)
+
+# Counting Settings
 counting_channel_id = None
-
-if os.path.exists(db_file):
-    with open(db_file, "r") as f:
-        db = json.load(f)
-else:
-    db = {"users": {}, "counting": {"number": 1, "last_user": None, "channel_id": None}}
-
-def save_db():
-    with open(db_file, "w") as f:
-        json.dump(db, f, indent=4)
 
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
-    try:
-        synced = await tree.sync()
-        print(f"Synced {len(synced)} command(s)")
-    except Exception as e:
-        print(e)
+    load_db()
 
-@tree.command(name="setchannel", description="Set the counting channel")
-async def setchannel(interaction: discord.Interaction):
-    db["counting"]["channel_id"] = interaction.channel.id
-    save_db()
-    await interaction.response.send_message("This channel is now the counting channel!", ephemeral=True)
-
-@tree.command(name="balance", description="Check your balance")
-async def balance(interaction: discord.Interaction):
-    user_id = str(interaction.user.id)
-    if user_id not in db["users"]:
-        db["users"][user_id] = {"balance": 0, "last_daily": 0, "counted": 0}
-    save_db()
-    await interaction.response.send_message(f"Your balance: 💰 {db['users'][user_id]['balance']}")
-
-@tree.command(name="daily", description="Claim your daily reward")
-async def daily(interaction: discord.Interaction):
-    user_id = str(interaction.user.id)
-    now = int(time.time())
-    if user_id not in db["users"]:
-        db["users"][user_id] = {"balance": 0, "last_daily": 0, "counted": 0}
-    if now - db["users"][user_id]["last_daily"] >= 86400:
-        db["users"][user_id]["balance"] += 100
-        db["users"][user_id]["last_daily"] = now
-        save_db()
-        await interaction.response.send_message("You claimed 💰 100 daily coins!")
-    else:
-        remaining = 86400 - (now - db["users"][user_id]["last_daily"])
-        await interaction.response.send_message(f"You need to wait {int(remaining/3600)}h {int((remaining%3600)/60)}m more.")
-
-@tree.command(name="leaderboard", description="See the counting leaderboard")
-async def leaderboard(interaction: discord.Interaction):
-    sorted_users = sorted(db["users"].items(), key=lambda x: x[1].get("counted", 0), reverse=True)
-    desc = ""
-    for i, (uid, data) in enumerate(sorted_users[:10], 1):
-        user = await bot.fetch_user(int(uid))
-        desc += f"**{i}.** {user.name} - {data.get('counted', 0)} counts\n"
-    embed = discord.Embed(title="🏆 Leaderboard", description=desc)
-    await interaction.response.send_message(embed=embed)
-
-@tree.command(name="shop", description="View and buy items")
-@app_commands.describe(role_name="For ❓ a mystery ❓, enter the role to receive")
-async def shop(interaction: discord.Interaction, role_name: str = None):
-    user_id = str(interaction.user.id)
-    if user_id not in db["users"]:
-        db["users"][user_id] = {"balance": 0, "last_daily": 0, "counted": 0}
-    items = {
-        "🍪 Cookie": {"price": 10, "desc": "nom nom"},
-        "🎁 Lootbox": {"price": 50, "desc": "What's inside?"},
-        "❓ a mystery ❓": {"price": 0, "desc": "Gives you a role!"}
-    }
-    options = []
-    for name, data in items.items():
-        options.append(discord.SelectOption(label=name, description=f"{data['desc']} (💰 {data['price']})"))
-
-    class ShopSelect(discord.ui.Select):
-        def __init__(self):
-            super().__init__(placeholder="Choose an item to buy", options=options)
-
-        async def callback(self, interaction2: discord.Interaction):
-            choice = self.values[0]
-            item = items[choice]
-            if db["users"][user_id]["balance"] >= item["price"]:
-                db["users"][user_id]["balance"] -= item["price"]
-                if choice == "❓ a mystery ❓" and role_name:
-                    role = discord.utils.get(interaction.guild.roles, name=role_name)
-                    if role:
-                        await interaction.user.add_roles(role)
-                        await interaction2.response.send_message(f"You got the role {role_name}! 🎉")
-                    else:
-                        await interaction2.response.send_message("Role not found.")
-                else:
-                    await interaction2.response.send_message(f"You bought {choice}!")
-                save_db()
-            else:
-                await interaction2.response.send_message("Not enough balance.")
-
-    view = discord.ui.View()
-    view.add_item(ShopSelect())
-    await interaction.response.send_message("Welcome to the shop!", view=view)
-
-@tree.command(name="profile", description="View your profile")
-async def profile(interaction: discord.Interaction):
-    user_id = str(interaction.user.id)
-    if user_id not in db["users"]:
-        db["users"][user_id] = {"balance": 0, "last_daily": 0, "counted": 0}
-    user = interaction.user
-    embed = discord.Embed(title=f"{user.name}'s Profile")
-    embed.set_thumbnail(url=user.display_avatar.url)
-    embed.add_field(name="💰 Balance", value=str(db["users"][user_id]["balance"]))
-    embed.add_field(name="🔢 Counted", value=str(db["users"][user_id]["counted"]))
-    await interaction.response.send_message(embed=embed)
-
-@tree.command(name="trivia", description="Play a trivia game")
-async def trivia(interaction: discord.Interaction):
-    with open(trivia_file, "r") as f:
-        questions = json.load(f)
-    q = random.choice(questions)
-
-    class TriviaView(discord.ui.View):
-        def __init__(self):
-            super().__init__()
-            for key, val in q["choices"].items():
-                self.add_item(discord.ui.Button(label=val, custom_id=key))
-            self.add_item(discord.ui.Button(label="Another Question", style=discord.ButtonStyle.secondary, custom_id="another"))
-
-        @discord.ui.button(label="Reveal Answer", style=discord.ButtonStyle.blurple)
-        async def reveal(self, interaction2: discord.Interaction, button: discord.ui.Button):
-            correct = q["choices"][q["correct"]]
-            await interaction2.response.send_message(f"✅ Correct answer: {correct}")
-
-    await interaction.response.send_message(f"❓ {q['question']}", view=TriviaView())
-
-@tree.command(name="funny", description="Show a funny image")
-async def funny(interaction: discord.Interaction):
-    url = "https://cdn.discordapp.com/attachments/1368349957718802572/1368357820507885618/image.png?ex=6817ee07&is=68169c87&hm=537c1b38a8525ba52acb5e2a3c6b36796bb3ae85e9a72124162e7011b0d68aa3&"
-    await interaction.response.send_message(url)
-
-@tree.command(name="meme", description="Show a cryptic meme")
-async def meme(interaction: discord.Interaction):
-    msg = "ün ün ün 𓀂𓀇𓀉𓀍𓀠𓁀𓁂𓀱𓁉𓀿𓀪𓁶𓂧𓂮𓂫𓃹𓃳𓄜𓄲𓄓𓅆𓅢𓅼𓆀𓆾𓈙𓉒𓉼𓊪𓋜𓋒𓍲𓎳𓁀𓄲𓅢 ün ün ün ün ün ün AAAAAAAAAAAAAOOOOOOOOORRRRXT 01001000 0110101 01101000 01100101 0010000 01001001 0010000 01101000 01100001 01110110 01100101 00100000 01110011 01100101 01111000 00100000 01110111 01101001 01110100 01101000 00100000 01101101 00100000 01110000 01101111 01101111 01110000 01101111 01101111 00100000 01110000 01110000"
-    await interaction.response.send_message(msg)
-
+# Counting System
 @bot.event
 async def on_message(message):
-    if message.author.bot:
+    global counting_channel_id
+    if counting_channel_id is None:
         return
 
-    channel_id = db["counting"].get("channel_id")
-    if channel_id and message.channel.id == channel_id:
-        content = message.content.replace(" ", "")
+    if message.channel.id == counting_channel_id and message.author != bot.user:
         try:
-            number = eval(content, {"__builtins__": {}}, math.__dict__)
-            if int(number) == db["counting"]["number"]:
-                db["counting"]["number"] += 1
-                db["counting"]["last_user"] = str(message.author.id)
-                uid = str(message.author.id)
-                if uid not in db["users"]:
-                    db["users"][uid] = {"balance": 0, "last_daily": 0, "counted": 0}
-                db["users"][uid]["counted"] += 1
-                await message.channel.send(str(db["counting"]["number"]))
-                db["counting"]["number"] += 1
+            user_input = int(message.content)
+            last_count = load_db().get("count", 0)
+            if user_input == last_count + 1:
+                last_count += 1
+                save_db({"count": last_count})
+                await message.channel.send(f"{last_count} ✅")
             else:
-                db["counting"]["number"] = 1
-                await message.channel.send("❌ Wrong number! Start over from 1.")
-        except:
-            await message.channel.send("❌ Invalid input.")
-        save_db()
+                await message.channel.send(f"❌ Wrong number! The last count was {last_count}. Please start from {last_count + 1}.")
+        except ValueError:
+            pass
+
     await bot.process_commands(message)
 
-bot.run(os.getenv("DISCORD_TOKEN"))
+# /setchannel command
+@bot.command()
+async def setchannel(ctx, channel_id: int):
+    if ctx.channel.id == channel_id:
+        counting_channel_id = channel_id
+        await ctx.send(f"Counting channel set to {ctx.channel.name}")
+    else:
+        await ctx.send("Invalid channel.")
+
+# /shop command
+@bot.command()
+async def shop(ctx):
+    shop_items = [
+        {"name": "Mystery Box", "price": 100, "description": "A mysterious box that grants a surprise! 🎁"},
+        {"name": "Cookie 🍪", "price": 50, "description": "Nom nom! 🍪"},
+        {"name": "Role Mystery ❓", "price": 200, "description": "Get a random mystery role! 🎭"}
+    ]
+    
+    shop_embed = discord.Embed(title="Welcome to the Shop!", description="Pick an item to buy!")
+    for item in shop_items:
+        shop_embed.add_field(name=item['name'], value=f"Price: {item['price']} Coins\nDescription: {item['description']}", inline=False)
+    
+    shop_embed.set_footer(text="Use the /buy command to purchase items.")
+    await ctx.send(embed=shop_embed)
+
+# /buy command
+@bot.command()
+async def buy(ctx, item_name: str):
+    # Example check for the role "Shop Searcher"
+    if item_name.lower() == "role mystery ❓":
+        user_data = load_db().get(str(ctx.author.id), {})
+        user_balance = user_data.get("balance", 0)
+
+        if user_balance >= 200:
+            user_data["balance"] -= 200
+            save_db(user_data)
+            role = discord.utils.get(ctx.guild.roles, name="Shop Searcher")
+            await ctx.author.add_roles(role)
+            await ctx.send(f"Congrats {ctx.author.mention}, you've bought the Mystery Role! 🎉")
+        else:
+            await ctx.send("You don't have enough coins! 😞")
+
+# /balance command
+@bot.command()
+async def balance(ctx):
+    user_data = load_db().get(str(ctx.author.id), {})
+    balance = user_data.get("balance", 0)
+    await ctx.send(f"{ctx.author.mention}, you currently have {balance} coins!")
+
+# /daily command
+@bot.command()
+async def daily(ctx):
+    user_data = load_db().get(str(ctx.author.id), {})
+    last_claim = user_data.get("last_claim", 0)
+    if last_claim + 86400 > int(time.time()):
+        await ctx.send("You can only claim your daily reward once every 24 hours!")
+        return
+
+    user_data["balance"] = user_data.get("balance", 0) + 100
+    user_data["last_claim"] = int(time.time())
+    save_db(user_data)
+    await ctx.send(f"Congrats {ctx.author.mention}, you've received 100 coins! 🎉")
+
+# Trivia command
+@bot.command()
+async def trivia(ctx):
+    question = random.choice(trivia_data)
+    question_embed = discord.Embed(title=question["question"], description="")
+    for choice, answer in question["choices"].items():
+        question_embed.add_field(name=choice, value=answer, inline=False)
+    view = View()
+    for choice, answer in question["choices"].items():
+        button = Button(label=choice, style=discord.ButtonStyle.secondary, custom_id=choice)
+        view.add_item(button)
+    await ctx.send(embed=question_embed, view=view)
+
+    # Wait for the user's answer
+    def check(interaction):
+        return interaction.user == ctx.author
+
+    interaction = await bot.wait_for("button_click", check=check)
+    if interaction.custom_id == question["correct"]:
+        await interaction.response.send_message("Correct! 🎉")
+    else:
+        await interaction.response.send_message("Wrong answer! 😞")
+
+    await ctx.send("Another Question?")
+
+# Funny command
+@bot.command()
+async def funny(ctx):
+    funny_url = "https://cdn.discordapp.com/attachments/1368349957718802572/1368357820507885618/image.png?ex=6817ee07&is=68169c87&hm=537c1b38a8525ba52acb5e2a3c6b36796bb3ae85e9a72124162e7011b0d68aa3&"
+    await ctx.send(funny_url)
+
+# Meme command
+@bot.command()
+async def meme(ctx):
+    await ctx.send("ün ün ün 𓀂𓀇𓀉𓀍𓀠𓁀𓁂𓀱𓁉𓀿𓀪𓁶𓂧𓂮𓂫𓃹𓃳𓄜𓄲𓄓𓅆𓅢𓅼𓆀𓆾𓈙𓉒𓉼𓊪𓋜𓋒𓍲𓎳𓁀𓄲𓅢 ün ün ün ün ün ün AAAAAAAAAAAAAOOOOOOOOORRRRXT 01001000 0110101 01101000 01100101 0010000 01001001 0010000 01101000 01100001 01110110 01100101 00100000 01110011 01100101 01111000 00100000 01110111 01101001 01110100 01101000 00100000 01101101 00100000 01110000 01101111 01101111 01110000 01101111 01101111 00100000 01110000 01110000")
+
+bot.run(TOKEN)
