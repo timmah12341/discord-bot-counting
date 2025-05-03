@@ -213,4 +213,4 @@ async def trivia(interaction: discord.Interaction):
     embed = discord.Embed(title="❓ Trivia", description=q["question"], color=discord.Color.blurple())
     await interaction.response.send_message(embed=embed, view=TriviaView(), ephemeral=True)
 
-bot.run(DISCORD_TOKEN)
+bot.run("DISCORD_TOKEN")
