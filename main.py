@@ -204,7 +204,7 @@ async def profile(ctx):
 @bot.event
 async def on_ready():
     # Sync commands to Discord
-    await bot.tree.sync()
+    await bot.tree.sync()  # This will sync all commands with Discord
     print(f"Logged in as {bot.user}")
 
 # Run the bot
