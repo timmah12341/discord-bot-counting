@@ -1,169 +1,185 @@
 import discord
 from discord.ext import commands, tasks
-from discord.ui import Button, View
-import json
 import os
-from dotenv import load_dotenv
 import random
+import json
 import math
-import asyncio
+from discord.ui import Button, View
 
-# Load environment variables
-load_dotenv()
-TOKEN = os.getenv("DISCORD_TOKEN")
+# Load environment variables (e.g., DISCORD_TOKEN) from the environment in Railway
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 
-# Bot Setup
+# Setup the bot
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True
+
 bot = commands.Bot(command_prefix='/', intents=intents)
 
-# Database File
-db_path = "db.json"
-if not os.path.exists(db_path):
-    with open(db_path, 'w') as f:
-        json.dump({}, f)
-
-# Helper to load DB
-def load_db():
-    with open(db_path, 'r') as f:
-        return json.load(f)
-
-# Helper to save DB
-def save_db(data):
-    with open(db_path, 'w') as f:
-        json.dump(data, f, indent=4)
-
 # Load trivia questions
-with open("trivia.json", "r") as file:
+with open('trivia.json', 'r') as file:
     trivia_data = json.load(file)
 
-# Counting Settings
-counting_channel_id = None
+# User data storage (this will be saved in a JSON file)
+user_data = {}
 
-@bot.event
-async def on_ready():
-    print(f"Logged in as {bot.user}")
-    load_db()
+# Load saved user data
+def load_user_data():
+    global user_data
+    try:
+        with open("user_data.json", "r") as file:
+            user_data = json.load(file)
+    except FileNotFoundError:
+        user_data = {}
 
-# Counting System
-@bot.event
-async def on_message(message):
-    global counting_channel_id
-    if counting_channel_id is None:
-        return
+def save_user_data():
+    with open("user_data.json", "w") as file:
+        json.dump(user_data, file, indent=4)
 
-    if message.channel.id == counting_channel_id and message.author != bot.user:
-        try:
-            user_input = int(message.content)
-            last_count = load_db().get("count", 0)
-            if user_input == last_count + 1:
-                last_count += 1
-                save_db({"count": last_count})
-                await message.channel.send(f"{last_count} ✅")
-            else:
-                await message.channel.send(f"❌ Wrong number! The last count was {last_count}. Please start from {last_count + 1}.")
-        except ValueError:
-            pass
+load_user_data()
 
-    await bot.process_commands(message)
+# Counting system
+count_channel_id = None  # To store the channel ID for counting
 
-# /setchannel command
+# Command to set the counting channel
 @bot.command()
 async def setchannel(ctx, channel_id: int):
-    if ctx.channel.id == channel_id:
-        counting_channel_id = channel_id
-        await ctx.send(f"Counting channel set to {ctx.channel.name}")
-    else:
-        await ctx.send("Invalid channel.")
+    """Command to set the counting channel."""
+    global count_channel_id
+    count_channel_id = channel_id
+    await ctx.send(f"Counting channel set to <#{count_channel_id}>.")
 
-# /shop command
-@bot.command()
-async def shop(ctx):
-    shop_items = [
-        {"name": "Mystery Box", "price": 100, "description": "A mysterious box that grants a surprise! 🎁"},
-        {"name": "Cookie 🍪", "price": 50, "description": "Nom nom! 🍪"},
-        {"name": "Role Mystery ❓", "price": 200, "description": "Get a random mystery role! 🎭"}
-    ]
-    
-    shop_embed = discord.Embed(title="Welcome to the Shop!", description="Pick an item to buy!")
-    for item in shop_items:
-        shop_embed.add_field(name=item['name'], value=f"Price: {item['price']} Coins\nDescription: {item['description']}", inline=False)
-    
-    shop_embed.set_footer(text="Use the /buy command to purchase items.")
-    await ctx.send(embed=shop_embed)
+# Counting function (handles both math and regular counting)
+@bot.event
+async def on_message(message):
+    global count_channel_id
 
-# /buy command
-@bot.command()
-async def buy(ctx, item_name: str):
-    # Example check for the role "Shop Searcher"
-    if item_name.lower() == "role mystery ❓":
-        user_data = load_db().get(str(ctx.author.id), {})
-        user_balance = user_data.get("balance", 0)
-
-        if user_balance >= 200:
-            user_data["balance"] -= 200
-            save_db(user_data)
-            role = discord.utils.get(ctx.guild.roles, name="Shop Searcher")
-            await ctx.author.add_roles(role)
-            await ctx.send(f"Congrats {ctx.author.mention}, you've bought the Mystery Role! 🎉")
-        else:
-            await ctx.send("You don't have enough coins! 😞")
-
-# /balance command
-@bot.command()
-async def balance(ctx):
-    user_data = load_db().get(str(ctx.author.id), {})
-    balance = user_data.get("balance", 0)
-    await ctx.send(f"{ctx.author.mention}, you currently have {balance} coins!")
-
-# /daily command
-@bot.command()
-async def daily(ctx):
-    user_data = load_db().get(str(ctx.author.id), {})
-    last_claim = user_data.get("last_claim", 0)
-    if last_claim + 86400 > int(time.time()):
-        await ctx.send("You can only claim your daily reward once every 24 hours!")
+    if message.author == bot.user:
         return
 
-    user_data["balance"] = user_data.get("balance", 0) + 100
-    user_data["last_claim"] = int(time.time())
-    save_db(user_data)
-    await ctx.send(f"Congrats {ctx.author.mention}, you've received 100 coins! 🎉")
+    if message.channel.id != count_channel_id:
+        return
+
+    if message.content.isdigit():
+        num = int(message.content)
+        if num % 2 != 0:  # User posts odd number
+            next_number = num + 1
+            await message.channel.send(str(next_number))  # Bot posts even number
+        else:
+            await message.channel.send("You posted an even number. Try posting an odd one!")
+    else:
+        # If the message has math symbols, evaluate it
+        try:
+            result = eval(message.content)
+            await message.channel.send(f"Result: {result}")
+        except Exception as e:
+            await message.channel.send(f"Error in math expression: {e}")
+
+    await bot.process_commands(message)
 
 # Trivia command
 @bot.command()
 async def trivia(ctx):
+    """Starts a trivia quiz."""
     question = random.choice(trivia_data)
-    question_embed = discord.Embed(title=question["question"], description="")
-    for choice, answer in question["choices"].items():
-        question_embed.add_field(name=choice, value=answer, inline=False)
+    correct_answer = question["correct"]
+    options = question["choices"]
+
+    buttons = [
+        Button(label=options["A"], custom_id="A"),
+        Button(label=options["B"], custom_id="B"),
+        Button(label=options["C"], custom_id="C"),
+    ]
+
     view = View()
-    for choice, answer in question["choices"].items():
-        button = Button(label=choice, style=discord.ButtonStyle.secondary, custom_id=choice)
+    for button in buttons:
         view.add_item(button)
-    await ctx.send(embed=question_embed, view=view)
 
-    # Wait for the user's answer
     def check(interaction):
-        return interaction.user == ctx.author
+        return interaction.user == ctx.author and interaction.message == ctx.message
 
-    interaction = await bot.wait_for("button_click", check=check)
-    if interaction.custom_id == question["correct"]:
-        await interaction.response.send_message("Correct! 🎉")
-    else:
-        await interaction.response.send_message("Wrong answer! 😞")
+    await ctx.send(question["question"], view=view)
 
-    await ctx.send("Another Question?")
+    # Wait for an answer
+    interaction = await bot.wait_for("interaction", check=check)
 
-# Funny command
+    # Show the correct answer
+    await interaction.response.send_message(f"The correct answer is: {correct_answer}.")
+
+# Balance command
 @bot.command()
-async def funny(ctx):
-    funny_url = "https://cdn.discordapp.com/attachments/1368349957718802572/1368357820507885618/image.png?ex=6817ee07&is=68169c87&hm=537c1b38a8525ba52acb5e2a3c6b36796bb3ae85e9a72124162e7011b0d68aa3&"
-    await ctx.send(funny_url)
+async def balance(ctx):
+    """Shows the user's balance."""
+    user_id = str(ctx.author.id)
+    balance = user_data.get(user_id, {}).get("balance", 0)
+    await ctx.send(f"Your balance is: {balance} coins.")
+
+# Daily reward command
+@bot.command()
+async def daily(ctx):
+    """Gives the user a daily reward."""
+    user_id = str(ctx.author.id)
+    if user_id not in user_data:
+        user_data[user_id] = {"balance": 0, "last_daily": 0}
+        save_user_data()
+
+    last_daily = user_data[user_id].get("last_daily", 0)
+    current_time = int(time.time())
+
+    # Check if the user has already claimed the daily reward
+    if current_time - last_daily < 86400:
+        await ctx.send("You have already claimed your daily reward! Try again tomorrow.")
+    else:
+        # Give daily reward (100 coins)
+        user_data[user_id]["balance"] += 100
+        user_data[user_id]["last_daily"] = current_time
+        save_user_data()
+        await ctx.send("You have claimed your daily reward of 100 coins!")
 
 # Meme command
 @bot.command()
 async def meme(ctx):
+    """Send a cryptic meme message."""
     await ctx.send("ün ün ün 𓀂𓀇𓀉𓀍𓀠𓁀𓁂𓀱𓁉𓀿𓀪𓁶𓂧𓂮𓂫𓃹𓃳𓄜𓄲𓄓𓅆𓅢𓅼𓆀𓆾𓈙𓉒𓉼𓊪𓋜𓋒𓍲𓎳𓁀𓄲𓅢 ün ün ün ün ün ün AAAAAAAAAAAAAOOOOOOOOORRRRXT 01001000 0110101 01101000 01100101 0010000 01001001 0010000 01101000 01100001 01110110 01100101 00100000 01110011 01100101 01111000 00100000 01110111 01101001 01110100 01101000 00100000 01101101 00100000 01110000 01101111 01101111 01110000 01101111 01101111 00100000 01110000 01110000")
 
-bot.run("TOKEN")
+# Funny command
+@bot.command()
+async def funny(ctx):
+    """Send a funny image URL."""
+    await ctx.send("Here’s a funny image for you: https://cdn.discordapp.com/attachments/1368349957718802572/1368357820507885618/image.png")
+
+# Shop command (now allows role purchases)
+@bot.command()
+async def shop(ctx):
+    """Show the available items in the shop."""
+    items = {
+        "Mystery Box": "A box full of surprises, buy to find out what you get!",
+        "Magic Wand": "A wand that grants you a random bonus when used.",
+        "❓ a mystery ❓": "A mystery box that grants the 'Shop Searcher' role! Free to claim."
+    }
+
+    item_buttons = []
+    for item, description in items.items():
+        button = Button(label=f"{item}: {description}", custom_id=item)
+        item_buttons.append(button)
+
+    view = View()
+    for button in item_buttons:
+        view.add_item(button)
+
+    await ctx.send("Welcome to the shop! Choose an item to buy:", view=view)
+
+    def check(interaction):
+        return interaction.user == ctx.author and interaction.message == ctx.message
+
+    interaction = await bot.wait_for("interaction", check=check)
+
+    if interaction.custom_id == "❓ a mystery ❓":
+        role = discord.utils.get(ctx.guild.roles, name="Shop Searcher")
+        if not role:
+            role = await ctx.guild.create_role(name="Shop Searcher")
+        await interaction.user.add_roles(role)
+        await interaction.response.send_message("You have received the 'Shop Searcher' role!")
+
+# Run the bot
+bot.run(DISCORD_TOKEN)
