@@ -58,25 +58,23 @@ async def on_message(message):
     if message.author == bot.user:
         return
 
-    if message.channel.id != count_channel_id:
-        return
-
-    if message.content.isdigit():
-        num = int(message.content)
-        if num % 2 != 0:  # User posts odd number
-            next_number = num + 1
-            await message.channel.send(str(next_number))  # Bot posts even number
+    if count_channel_id and message.channel.id == count_channel_id:
+        if message.content.isdigit():
+            num = int(message.content)
+            if num % 2 != 0:  # User posts odd number
+                next_number = num + 1
+                await message.channel.send(str(next_number))  # Bot posts even number
+            else:
+                await message.channel.send("You posted an even number. Try posting an odd one!")
         else:
-            await message.channel.send("You posted an even number. Try posting an odd one!")
+            # If the message has math symbols, evaluate it
+            try:
+                result = eval(message.content)
+                await message.channel.send(f"Result: {result}")
+            except Exception as e:
+                await message.channel.send(f"Error in math expression: {e}")
     else:
-        # If the message has math symbols, evaluate it
-        try:
-            result = eval(message.content)
-            await message.channel.send(f"Result: {result}")
-        except Exception as e:
-            await message.channel.send(f"Error in math expression: {e}")
-
-    await bot.process_commands(message)
+        await bot.process_commands(message)
 
 # Trivia command
 @bot.command()
