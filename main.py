@@ -3,11 +3,10 @@ from discord.ext import commands, tasks
 import os
 import random
 import json
-import math
 import time
 from discord.ui import Button, View
 
-# Load environment variables (e.g., DISCORD_TOKEN) from the environment in Railway
+# Load environment variables (e.g., DISCORD_TOKEN) from the environment
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 
 # Setup the bot
@@ -44,10 +43,10 @@ count_channel_id = None  # To store the channel ID for counting
 
 # Command to set the counting channel
 @bot.tree.command(name="setchannel", description="Set the counting channel.")
-async def setchannel(interaction: discord.Interaction, channel_id: int):
-    """Command to set the counting channel."""
+async def setchannel(interaction: discord.Interaction):
+    """Command to set the counting channel to the current one."""
     global count_channel_id
-    count_channel_id = channel_id
+    count_channel_id = interaction.channel.id
     await interaction.response.send_message(f"Counting channel set to <#{count_channel_id}>.")
 
 # Counting function (handles both math and regular counting)
@@ -179,6 +178,27 @@ async def shop(ctx):
             role = await ctx.guild.create_role(name="Shop Searcher")
         await interaction.user.add_roles(role)
         await interaction.response.send_message("You have received the 'Shop Searcher' role!")
+
+# Leaderboard command
+@bot.command()
+async def leaderboard(ctx):
+    """Show the leaderboard based on balance."""
+    sorted_users = sorted(user_data.items(), key=lambda x: x[1].get("balance", 0), reverse=True)
+    leaderboard_message = "Leaderboard:\n"
+    for idx, (user_id, data) in enumerate(sorted_users[:10]):
+        user = await bot.fetch_user(user_id)
+        balance = data.get("balance", 0)
+        leaderboard_message += f"{idx + 1}. {user.name} - {balance} coins\n"
+
+    await ctx.send(leaderboard_message)
+
+# Profile command
+@bot.command()
+async def profile(ctx):
+    """Show the user's profile with balance info."""
+    user_id = str(ctx.author.id)
+    balance = user_data.get(user_id, {}).get("balance", 0)
+    await ctx.send(f"Profile for {ctx.author.name}:\nBalance: {balance} coins")
 
 # Sync commands to Discord on ready event
 @bot.event
