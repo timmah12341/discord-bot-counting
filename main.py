@@ -1,223 +1,188 @@
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-import os
 import json
-import random
+import os
+import asyncio
 import math
+import random
+import time
+from datetime import datetime, timedelta
 
-intents = discord.Intents.default()
-intents.message_content = True
+intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
-DB_FILE = "db.json"
-TRIVIA_FILE = "trivia.json"
+db_file = "db.json"
+trivia_file = "trivia.json"
+counting_channel_id = None
 
-# Load or initialize database
-if not os.path.exists(DB_FILE):
-    with open(DB_FILE, "w") as f:
-        json.dump({}, f)
+if os.path.exists(db_file):
+    with open(db_file, "r") as f:
+        db = json.load(f)
+else:
+    db = {"users": {}, "counting": {"number": 1, "last_user": None, "channel_id": None}}
 
-def load_db():
-    with open(DB_FILE, "r") as f:
-        return json.load(f)
-
-def save_db(db):
-    with open(DB_FILE, "w") as f:
+def save_db():
+    with open(db_file, "w") as f:
         json.dump(db, f, indent=4)
-
-def get_user_data(db, user_id):
-    if str(user_id) not in db:
-        db[str(user_id)] = {
-            "balance": 0,
-            "count": 0,
-            "last_count": 0,
-            "channel": None
-        }
-    return db[str(user_id)]
-
-def eval_math(expr):
-    try:
-        allowed_names = {
-            k: v for k, v in math.__dict__.items() if not k.startswith("__")
-        }
-        allowed_names.update({"pi": math.pi, "e": math.e})
-        return eval(expr, {"__builtins__": {}}, allowed_names)
-    except:
-        return None
 
 @bot.event
 async def on_ready():
-    await tree.sync()
     print(f"Logged in as {bot.user}")
+    try:
+        synced = await tree.sync()
+        print(f"Synced {len(synced)} command(s)")
+    except Exception as e:
+        print(e)
+
+@tree.command(name="setchannel", description="Set the counting channel")
+async def setchannel(interaction: discord.Interaction):
+    db["counting"]["channel_id"] = interaction.channel.id
+    save_db()
+    await interaction.response.send_message("This channel is now the counting channel!", ephemeral=True)
+
+@tree.command(name="balance", description="Check your balance")
+async def balance(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    if user_id not in db["users"]:
+        db["users"][user_id] = {"balance": 0, "last_daily": 0, "counted": 0}
+    save_db()
+    await interaction.response.send_message(f"Your balance: 💰 {db['users'][user_id]['balance']}")
+
+@tree.command(name="daily", description="Claim your daily reward")
+async def daily(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    now = int(time.time())
+    if user_id not in db["users"]:
+        db["users"][user_id] = {"balance": 0, "last_daily": 0, "counted": 0}
+    if now - db["users"][user_id]["last_daily"] >= 86400:
+        db["users"][user_id]["balance"] += 100
+        db["users"][user_id]["last_daily"] = now
+        save_db()
+        await interaction.response.send_message("You claimed 💰 100 daily coins!")
+    else:
+        remaining = 86400 - (now - db["users"][user_id]["last_daily"])
+        await interaction.response.send_message(f"You need to wait {int(remaining/3600)}h {int((remaining%3600)/60)}m more.")
+
+@tree.command(name="leaderboard", description="See the counting leaderboard")
+async def leaderboard(interaction: discord.Interaction):
+    sorted_users = sorted(db["users"].items(), key=lambda x: x[1].get("counted", 0), reverse=True)
+    desc = ""
+    for i, (uid, data) in enumerate(sorted_users[:10], 1):
+        user = await bot.fetch_user(int(uid))
+        desc += f"**{i}.** {user.name} - {data.get('counted', 0)} counts\n"
+    embed = discord.Embed(title="🏆 Leaderboard", description=desc)
+    await interaction.response.send_message(embed=embed)
+
+@tree.command(name="shop", description="View and buy items")
+@app_commands.describe(role_name="For ❓ a mystery ❓, enter the role to receive")
+async def shop(interaction: discord.Interaction, role_name: str = None):
+    user_id = str(interaction.user.id)
+    if user_id not in db["users"]:
+        db["users"][user_id] = {"balance": 0, "last_daily": 0, "counted": 0}
+    items = {
+        "🍪 Cookie": {"price": 10, "desc": "nom nom"},
+        "🎁 Lootbox": {"price": 50, "desc": "What's inside?"},
+        "❓ a mystery ❓": {"price": 0, "desc": "Gives you a role!"}
+    }
+    options = []
+    for name, data in items.items():
+        options.append(discord.SelectOption(label=name, description=f"{data['desc']} (💰 {data['price']})"))
+
+    class ShopSelect(discord.ui.Select):
+        def __init__(self):
+            super().__init__(placeholder="Choose an item to buy", options=options)
+
+        async def callback(self, interaction2: discord.Interaction):
+            choice = self.values[0]
+            item = items[choice]
+            if db["users"][user_id]["balance"] >= item["price"]:
+                db["users"][user_id]["balance"] -= item["price"]
+                if choice == "❓ a mystery ❓" and role_name:
+                    role = discord.utils.get(interaction.guild.roles, name=role_name)
+                    if role:
+                        await interaction.user.add_roles(role)
+                        await interaction2.response.send_message(f"You got the role {role_name}! 🎉")
+                    else:
+                        await interaction2.response.send_message("Role not found.")
+                else:
+                    await interaction2.response.send_message(f"You bought {choice}!")
+                save_db()
+            else:
+                await interaction2.response.send_message("Not enough balance.")
+
+    view = discord.ui.View()
+    view.add_item(ShopSelect())
+    await interaction.response.send_message("Welcome to the shop!", view=view)
+
+@tree.command(name="profile", description="View your profile")
+async def profile(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    if user_id not in db["users"]:
+        db["users"][user_id] = {"balance": 0, "last_daily": 0, "counted": 0}
+    user = interaction.user
+    embed = discord.Embed(title=f"{user.name}'s Profile")
+    embed.set_thumbnail(url=user.display_avatar.url)
+    embed.add_field(name="💰 Balance", value=str(db["users"][user_id]["balance"]))
+    embed.add_field(name="🔢 Counted", value=str(db["users"][user_id]["counted"]))
+    await interaction.response.send_message(embed=embed)
+
+@tree.command(name="trivia", description="Play a trivia game")
+async def trivia(interaction: discord.Interaction):
+    with open(trivia_file, "r") as f:
+        questions = json.load(f)
+    q = random.choice(questions)
+
+    class TriviaView(discord.ui.View):
+        def __init__(self):
+            super().__init__()
+            for key, val in q["choices"].items():
+                self.add_item(discord.ui.Button(label=val, custom_id=key))
+            self.add_item(discord.ui.Button(label="Another Question", style=discord.ButtonStyle.secondary, custom_id="another"))
+
+        @discord.ui.button(label="Reveal Answer", style=discord.ButtonStyle.blurple)
+        async def reveal(self, interaction2: discord.Interaction, button: discord.ui.Button):
+            correct = q["choices"][q["correct"]]
+            await interaction2.response.send_message(f"✅ Correct answer: {correct}")
+
+    await interaction.response.send_message(f"❓ {q['question']}", view=TriviaView())
+
+@tree.command(name="funny", description="Show a funny image")
+async def funny(interaction: discord.Interaction):
+    url = "https://cdn.discordapp.com/attachments/1368349957718802572/1368357820507885618/image.png?ex=6817ee07&is=68169c87&hm=537c1b38a8525ba52acb5e2a3c6b36796bb3ae85e9a72124162e7011b0d68aa3&"
+    await interaction.response.send_message(url)
+
+@tree.command(name="meme", description="Show a cryptic meme")
+async def meme(interaction: discord.Interaction):
+    msg = "ün ün ün 𓀂𓀇𓀉𓀍𓀠𓁀𓁂𓀱𓁉𓀿𓀪𓁶𓂧𓂮𓂫𓃹𓃳𓄜𓄲𓄓𓅆𓅢𓅼𓆀𓆾𓈙𓉒𓉼𓊪𓋜𓋒𓍲𓎳𓁀𓄲𓅢 ün ün ün ün ün ün AAAAAAAAAAAAAOOOOOOOOORRRRXT 01001000 0110101 01101000 01100101 0010000 01001001 0010000 01101000 01100001 01110110 01100101 00100000 01110011 01100101 01111000 00100000 01110111 01101001 01110100 01101000 00100000 01101101 00100000 01110000 01101111 01101111 01110000 01101111 01101111 00100000 01110000 01110000"
+    await interaction.response.send_message(msg)
 
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
 
-    db = load_db()
-    user_data = get_user_data(db, message.author.id)
-    guild_data = db.get("guild", {})
-    channel_id = guild_data.get("count_channel")
-
-    if channel_id and message.channel.id == int(channel_id):
-        result = eval_math(message.content)
-        if result is None or int(result) != user_data["last_count"] + 2:
-            user_data["last_count"] = 1 if int(result) == 1 else 0
-            save_db(db)
-            return
-
-        user_data["last_count"] = int(result)
-        user_data["count"] += 1
-        user_data["balance"] += 1
-        save_db(db)
-        await message.channel.send(embed=discord.Embed(
-            title="🔢 CountBot",
-            description=f"{bot.user.mention}: **{user_data['last_count'] + 1}** 🎉",
-            color=discord.Color.blurple()
-        ))
-
+    channel_id = db["counting"].get("channel_id")
+    if channel_id and message.channel.id == channel_id:
+        content = message.content.replace(" ", "")
+        try:
+            number = eval(content, {"__builtins__": {}}, math.__dict__)
+            if int(number) == db["counting"]["number"]:
+                db["counting"]["number"] += 1
+                db["counting"]["last_user"] = str(message.author.id)
+                uid = str(message.author.id)
+                if uid not in db["users"]:
+                    db["users"][uid] = {"balance": 0, "last_daily": 0, "counted": 0}
+                db["users"][uid]["counted"] += 1
+                await message.channel.send(str(db["counting"]["number"]))
+                db["counting"]["number"] += 1
+            else:
+                db["counting"]["number"] = 1
+                await message.channel.send("❌ Wrong number! Start over from 1.")
+        except:
+            await message.channel.send("❌ Invalid input.")
+        save_db()
     await bot.process_commands(message)
 
-@tree.command(name="setchannel", description="Set the counting channel (current channel).")
-async def setchannel(interaction: discord.Interaction):
-    db = load_db()
-    if "guild" not in db:
-        db["guild"] = {}
-    db["guild"]["count_channel"] = interaction.channel.id
-    save_db(db)
-    await interaction.response.send_message("✅ Counting channel has been set to this one!", ephemeral=True)
-
-@tree.command(name="balance", description="Check your balance.")
-async def balance(interaction: discord.Interaction):
-    db = load_db()
-    user_data = get_user_data(db, interaction.user.id)
-    await interaction.response.send_message(embed=discord.Embed(
-        title="💰 Your Balance",
-        description=f"You have **{user_data['balance']}** coins!",
-        color=discord.Color.gold()
-    ), ephemeral=True)
-
-@tree.command(name="profile", description="View your profile.")
-async def profile(interaction: discord.Interaction):
-    db = load_db()
-    user_data = get_user_data(db, interaction.user.id)
-    embed = discord.Embed(
-        title=f"🧍 {interaction.user.name}'s Profile",
-        description=f"🔢 Numbers Counted: `{user_data['count']}`\n💰 Balance: `{user_data['balance']}`",
-        color=discord.Color.blue()
-    )
-    embed.set_thumbnail(url=interaction.user.avatar.url if interaction.user.avatar else "")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-shop_items = {
-    "🍪 Cookie": {
-        "price": 5,
-        "effect": "nom nom"
-    },
-    "📦 Loot Box": {
-        "price": 15,
-        "effect": "You found something cool inside!"
-    },
-    "🎩 Fancy Hat": {
-        "price": 25,
-        "effect": "You're now 20% fancier!"
-    },
-    "❓ a mystery ❓": {
-        "price": 0,
-        "effect": "You got the **Shop Searcher** role!"
-    }
-}
-
-@tree.command(name="shop", description="Browse the shop.")
-async def shop(interaction: discord.Interaction):
-    options = [
-        discord.SelectOption(label=name, description=f"{data['effect']} - {data['price']} coins")
-        for name, data in shop_items.items()
-    ]
-
-    class ShopMenu(discord.ui.View):
-        @discord.ui.select(placeholder="Choose an item to buy!", options=options)
-        async def select_callback(self, interaction2: discord.Interaction, select: discord.ui.Select):
-            db = load_db()
-            user_data = get_user_data(db, interaction.user.id)
-            item = select.values[0]
-            item_data = shop_items[item]
-
-            if user_data["balance"] < item_data["price"]:
-                await interaction2.response.send_message("🚫 Not enough coins!", ephemeral=True)
-                return
-
-            if item == "❓ a mystery ❓":
-                role = discord.utils.get(interaction.guild.roles, name="Shop Searcher")
-                if role:
-                    await interaction.user.add_roles(role)
-                    await interaction2.response.send_message(f"{item_data['effect']}", ephemeral=True)
-            else:
-                await interaction2.response.send_message(f"✅ Bought {item}! {item_data['effect']}", ephemeral=True)
-
-            user_data["balance"] -= item_data["price"]
-            save_db(db)
-
-    await interaction.response.send_message(embed=discord.Embed(
-        title="🛍️ The Shop",
-        description="Choose something fun to buy below!",
-        color=discord.Color.green()
-    ), view=ShopMenu(), ephemeral=True)
-
-@tree.command(name="trivia", description="Answer a trivia question.")
-async def trivia(interaction: discord.Interaction):
-    with open(TRIVIA_FILE, "r") as f:
-        questions = json.load(f)
-
-    q = random.choice(questions)
-    correct_answer = q["correct"]
-    answer_texts = [f"{key}: {value}" for key, value in q["choices"].items()]
-
-    class TriviaView(discord.ui.View):
-        def __init__(self):
-            super().__init__(timeout=None)
-            for key, value in q["choices"].items():
-                self.add_item(discord.ui.Button(label=value, custom_id=key, style=discord.ButtonStyle.blurple))
-
-            self.add_item(discord.ui.Button(label="Another Question 🔁", style=discord.ButtonStyle.grey, custom_id="another"))
-
-        @discord.ui.button(label="Another Question", style=discord.ButtonStyle.grey, custom_id="another")
-        async def another_callback(self, interaction2: discord.Interaction, button: discord.ui.Button):
-            await trivia(interaction2)
-
-        async def interaction_check(self, i: discord.Interaction):
-            return i.user.id == interaction.user.id
-
-        async def on_timeout(self):
-            self.stop()
-
-        async def on_error(self, interaction: discord.Interaction, error: Exception, item):
-            await interaction.response.send_message("❌ Something went wrong.", ephemeral=True)
-
-    await interaction.response.send_message(embed=discord.Embed(
-        title="❓ Trivia Time!",
-        description=q["question"],
-        color=discord.Color.purple()
-    ), view=TriviaView(), ephemeral=True)
-
-@tree.command(name="leaderboard", description="See the top counters.")
-async def leaderboard(interaction: discord.Interaction):
-    db = load_db()
-    leaderboard = sorted(
-        ((uid, data["count"]) for uid, data in db.items() if uid.isdigit()),
-        key=lambda x: x[1],
-        reverse=True
-    )[:10]
-
-    desc = "\n".join([f"<@{uid}>: **{count}** counts" for uid, count in leaderboard])
-    await interaction.response.send_message(embed=discord.Embed(
-        title="🏆 Leaderboard",
-        description=desc or "No one has counted yet!",
-        color=discord.Color.orange()
-    ))
-
-# Run the bot
-bot.run(os.environ["DISCORD_TOKEN"])
+bot.run(os.getenv("DISCORD_TOKEN"))
