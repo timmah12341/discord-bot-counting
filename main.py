@@ -81,15 +81,14 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
-@tree.command(name="setchannel", description="Set the counting channel.")
-@app_commands.checks.has_permissions(administrator=True)
+@tree.command(name="setchannel", description="Set the counting channel (current channel).")
 async def setchannel(interaction: discord.Interaction):
     db = load_db()
     if "guild" not in db:
         db["guild"] = {}
     db["guild"]["count_channel"] = interaction.channel.id
     save_db(db)
-    await interaction.response.send_message("✅ Counting channel set!", ephemeral=True)
+    await interaction.response.send_message("✅ Counting channel has been set to this one!", ephemeral=True)
 
 @tree.command(name="balance", description="Check your balance.")
 async def balance(interaction: discord.Interaction):
