@@ -4,6 +4,7 @@ import os
 import random
 import json
 import math
+import time
 from discord.ui import Button, View
 
 # Load environment variables (e.g., DISCORD_TOKEN) from the environment in Railway
@@ -42,12 +43,12 @@ load_user_data()
 count_channel_id = None  # To store the channel ID for counting
 
 # Command to set the counting channel
-@bot.command()
-async def setchannel(ctx, channel_id: int):
+@bot.tree.command(name="setchannel", description="Set the counting channel.")
+async def setchannel(interaction: discord.Interaction, channel_id: int):
     """Command to set the counting channel."""
     global count_channel_id
     count_channel_id = channel_id
-    await ctx.send(f"Counting channel set to <#{count_channel_id}>.")
+    await interaction.response.send_message(f"Counting channel set to <#{count_channel_id}>.")
 
 # Counting function (handles both math and regular counting)
 @bot.event
@@ -180,6 +181,13 @@ async def shop(ctx):
             role = await ctx.guild.create_role(name="Shop Searcher")
         await interaction.user.add_roles(role)
         await interaction.response.send_message("You have received the 'Shop Searcher' role!")
+
+# Sync commands to Discord on ready event
+@bot.event
+async def on_ready():
+    # Sync commands to Discord
+    await bot.tree.sync()
+    print(f"Logged in as {bot.user}")
 
 # Run the bot
 bot.run(DISCORD_TOKEN)
