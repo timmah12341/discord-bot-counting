@@ -25,6 +25,27 @@ async def create_db_pool():
     global pool
     pool = await asyncpg.create_pool(dsn=DATABASE_URL)
 
+async def create_tables():
+    async with pool.acquire() as conn:
+        # Create trivia_questions table if it doesn't exist
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS trivia_questions (
+                id SERIAL PRIMARY KEY,
+                question TEXT NOT NULL,
+                choice_a TEXT NOT NULL,
+                choice_b TEXT NOT NULL,
+                choice_c TEXT NOT NULL,
+                correct CHAR(1) NOT NULL
+            );
+        ''')
+
+@bot.event
+async def on_ready():
+    print(f'Logged in as {bot.user}')
+    await create_db_pool()
+    await create_tables()  # Ensure the table is created
+    await refresh_trivia()  # Then refresh the trivia questions
+
 # Trivia refresh function
 async def refresh_trivia():
     with open('trivia.json') as f:
