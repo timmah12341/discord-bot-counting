@@ -3,110 +3,95 @@ from discord.ext import commands, tasks
 import asyncpg
 import os
 from dotenv import load_dotenv
-import asyncio
+from discord import app_commands
 
 # Load environment variables from .env file
 load_dotenv()
 
-# Get the Discord token and PostgreSQL URL from environment variables
-TOKEN = os.getenv('DISCORD_TOKEN')
-DATABASE_URL = os.getenv('DATABASE_URL')
+# Get the DATABASE_URL from the environment variables
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL not set in environment variables!")
 
-# Global variable for PostgreSQL connection pool
+# Initialize the bot
+intents = discord.Intents.default()
+intents.messages = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# Create a global pool variable for database connection
 pool = None
 
-# Create the bot instance
-intents = discord.Intents.default()
-bot = commands.Bot(command_prefix="/", intents=intents)
-
-# Function to initialize the PostgreSQL connection pool
 async def create_db_pool():
+    """Create a database connection pool."""
     global pool
     pool = await asyncpg.create_pool(dsn=DATABASE_URL)
+    print("Connected to the database")
 
-# Bot event: on_ready
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user}")
-    # Initialize the database pool when the bot is ready
+    """Bot is ready."""
+    print(f'Logged in as {bot.user}')
     await create_db_pool()
 
-# Example of the /setchannel command to set the channel for counting
+# Command to check if the bot is connected to the database
+@bot.command()
+async def check_db(ctx):
+    """Check if the bot is connected to the database."""
+    if pool is not None:
+        await ctx.send("Database connection is active!")
+    else:
+        await ctx.send("Database connection is not established.")
+
+# Example of a command to store and retrieve user data from the database
+@bot.command()
+async def set_balance(ctx, balance: int):
+    """Set the balance for a user."""
+    user_id = ctx.author.id
+    async with pool.acquire() as conn:
+        await conn.execute("INSERT INTO users (user_id, balance) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET balance = $2", user_id, balance)
+    await ctx.send(f"Your balance has been set to {balance}.")
+
+@bot.command()
+async def get_balance(ctx):
+    """Get the balance for a user."""
+    user_id = ctx.author.id
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT balance FROM users WHERE user_id = $1", user_id)
+        if row:
+            await ctx.send(f"Your balance is {row['balance']}.")
+        else:
+            await ctx.send("You don't have a balance set yet.")
+
+# Trivia command example
+@bot.command()
+async def trivia(ctx, question: str, answer: str):
+    """Ask a trivia question and store the answer."""
+    user_id = ctx.author.id
+    async with pool.acquire() as conn:
+        await conn.execute("INSERT INTO trivia (user_id, question, answer) VALUES ($1, $2, $3)", user_id, question, answer)
+    await ctx.send(f"Question: {question}\nAnswer: {answer}")
+
+# Command to set the counting channel
 @bot.command()
 async def setchannel(ctx):
-    """Sets the channel to send counting messages."""
-    # Set the counting channel in the database
+    """Set the channel for counting."""
+    channel_id = ctx.channel.id
+    # Save the channel ID for counting purposes (to database or in-memory)
     async with pool.acquire() as conn:
-        await conn.execute("INSERT INTO settings (guild_id, counting_channel) VALUES ($1, $2) ON CONFLICT (guild_id) DO UPDATE SET counting_channel = $2", ctx.guild.id, str(ctx.channel.id))
-    await ctx.send(f"Counting channel set to {ctx.channel.name}.")
+        await conn.execute("INSERT INTO settings (setting_key, setting_value) VALUES ($1, $2) ON CONFLICT (setting_key) DO UPDATE SET setting_value = $2", 'counting_channel', str(channel_id))
+    await ctx.send(f"This channel has been set as the counting channel.")
 
-# Example of the /shop command
+# Command to get the counting channel
 @bot.command()
-async def shop(ctx):
-    """Displays the shop options."""
-    embed = discord.Embed(title="Shop", description="Buy items with points!")
-    embed.add_field(name="Item 1", value="A fun item!", inline=False)
-    embed.add_field(name="Item 2", value="Another fun item!", inline=False)
-    await ctx.send(embed=embed)
-
-# Example of the /balance command to check a user's balance
-@bot.command()
-async def balance(ctx):
-    """Shows the user's balance."""
+async def getchannel(ctx):
+    """Get the currently set counting channel."""
     async with pool.acquire() as conn:
-        result = await conn.fetchrow("SELECT balance FROM user_balances WHERE user_id = $1", ctx.author.id)
-        balance = result['balance'] if result else 0
-    await ctx.send(f"Your balance is {balance} points.")
+        row = await conn.fetchrow("SELECT setting_value FROM settings WHERE setting_key = $1", 'counting_channel')
+        if row:
+            channel = bot.get_channel(int(row['setting_value']))
+            await ctx.send(f"The counting channel is {channel.mention}.")
+        else:
+            await ctx.send("No counting channel has been set yet.")
 
-# Example of the /daily command to give a daily reward
-@bot.command()
-async def daily(ctx):
-    """Gives the user their daily reward."""
-    async with pool.acquire() as conn:
-        # Assuming there's a `user_balances` table with `user_id` and `balance`
-        await conn.execute("INSERT INTO user_balances (user_id, balance) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET balance = balance + $2", ctx.author.id, 10)
-    await ctx.send(f"You've received your daily reward of 10 points!")
-
-# Example of the /meme command to send a cryptic meme
-@bot.command()
-async def meme(ctx):
-    """Sends a cryptic meme."""
-    await ctx.send("ün ün ün 𓀂𓀇𓀉𓀍𓀠𓁀𓁂𓀱𓁉𓀿𓀪𓁶𓂧𓂮𓂫𓃹𓃳𓄜𓄲𓄓𓅆𓅢𓅼𓆀𓆾𓈙𓉒𓉼𓊪𓋜𓋒𓍲𓎳𓁀𓄲𓅢 ün ün ün ün ün ün AAAAAAAAAAAAAOOOOOOOOORRRRXT 01001000 0110101 01101000 01100101 0010000 01001001 0010000 01101000 01100001 01110110 01100101 00100000 01110011 01100101 01111000 00100000 01110111 01101001 01110100 01101000 00100000 01101101 00100000 01110000 01101111 01101111 01110000 01101111 01101111 00100000 01110000 01110000")
-
-# Example of the /funny command to show an image
-@bot.command()
-async def funny(ctx):
-    """Sends a funny image."""
-    image_url = "https://cdn.discordapp.com/attachments/1368349957718802572/1368357820507885618/image.png?ex=6817ee07&is=68169c87&hm=537c1b38a8525ba52acb5e2a3c6b36796bb3ae85e9a72124162e7011b0d68aa3&"
-    await ctx.send(image_url)
-
-# Example of the /trivia command to ask a trivia question
-@bot.command()
-async def trivia(ctx):
-    """Asks a trivia question."""
-    question = "What is the capital of France?"
-    choices = {"A": "Paris", "B": "London", "C": "Berlin"}
-    correct = "A"
-    
-    # Send the trivia question with options
-    embed = discord.Embed(title=question)
-    for key, value in choices.items():
-        embed.add_field(name=key, value=value, inline=False)
-    
-    await ctx.send(embed=embed)
-
-    # Simulate the answer (you'd normally check the user's answer here)
-    await asyncio.sleep(5)  # Wait for a few seconds before revealing the answer
-    await ctx.send(f"The correct answer was {correct}: {choices[correct]}")
-
-# Example of the /leaderboard command to display a leaderboard
-@bot.command()
-async def leaderboard(ctx):
-    """Shows the leaderboard."""
-    async with pool.acquire() as conn:
-        results = await conn.fetch("SELECT user_id, balance FROM user_balances ORDER BY balance DESC LIMIT 10")
-        leaderboard = "\n".join([f"{i+1}. <@{row['user_id']}>: {row['balance']} points" for i, row in enumerate(results)])
-    await ctx.send(f"Leaderboard:\n{leaderboard}")
-
-# Running the bot
-bot.run(TOKEN)
+# Run the bot
+bot.run(os.getenv("DISCORD_TOKEN"))
