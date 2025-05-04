@@ -87,11 +87,11 @@ async def balance(interaction: discord.Interaction):
 
 @tree.command(name="meme", description="Get a mysterious meme")
 async def meme(interaction: discord.Interaction):
-    await interaction.response.send_message("𓆩🤔𓆪 𝚝𝚑𝚎 𝚠𝚘𝚛𝚕𝚍 𝚠𝚊𝚝𝚌𝚑𝚎𝚜 𝚢𝚘𝚞 𓂀 01001001 00100000 01100001 01101101 00100000 01101100 01101111 01101111 01101011 01101001 01101110 01100111")
+    await interaction.response.send_message("ün ün ün 𓀂𓀇𓀉𓀍𓀠𓁀𓁂𓀱𓁉𓀿𓀪𓁶𓂧𓂮𓂫𓃹𓃳𓄜𓄲𓄓𓅆𓅢𓅼𓆀𓆾𓈙𓉒𓉼𓊪𓋜𓋒𓍲𓎳𓁀𓄲𓅢 ün ün ün ün ün ün AAAAAAAAAAAAAOOOOOOOOORRRRXT 01001000 0110101 01101000 01100101 0010000 01001001 0010000 01101000 01100001 01110110 01100101 00100000 01110011 01100101 01111000 00100000 01110111 01101001 01110100 01101000 00100000 01101101 00100000 01110000 01101111 01101111 01110000 01101111 01101111 00100000 01110000 01110000")
 
 @tree.command(name="funny", description="Get a funny image")
 async def funny(interaction: discord.Interaction):
-    await interaction.response.send_message("https://cdn.discordapp.com/attachments/1032411584462047262/1234535675096023040/funny_image.png")
+    await interaction.response.send_message("https://cdn.discordapp.com/attachments/1368349957718802572/1368357820507885618/image.png?ex=6817ee07&is=68169c87&hm=537c1b38a8525ba52acb5e2a3c6b36796bb3ae85e9a72124162e7011b0d68aa3&")
 
 @tree.command(name="shop", description="View the shop and buy items")
 async def shop(interaction: discord.Interaction):
