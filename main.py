@@ -5,7 +5,6 @@ import asyncpg
 import json
 import os
 import math
-import random
 from datetime import datetime, timedelta
 
 intents = discord.Intents.default()
@@ -17,7 +16,6 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
 DATABASE_URL = os.environ["DATABASE_URL"]
-DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
 pool = None
 trivia_questions = []
 
@@ -27,20 +25,31 @@ safe_globals = {
     "pi": math.pi,
     "e": math.e,
     "sqrt": math.sqrt,
-    "log": math.log,
-    "log10": math.log10,
     "sin": math.sin,
     "cos": math.cos,
     "tan": math.tan,
-    "abs": abs,
-    "pow": pow,
-    "round": round
+    "log": math.log,
+    "log10": math.log10
 }
 
 async def refresh_trivia():
     global trivia_questions
     with open("trivia.json", "r") as f:
         trivia_questions = json.load(f)
+    async with pool.acquire() as conn:
+        await conn.execute("DROP TABLE IF EXISTS trivia_questions")
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS trivia_questions (
+                id SERIAL PRIMARY KEY,
+                question TEXT,
+                choices JSONB,
+                correct TEXT
+            )
+        """)
+        for q in trivia_questions:
+            await conn.execute("""
+                INSERT INTO trivia_questions (question, choices, correct) VALUES ($1, $2, $3)
+            """, q["question"], json.dumps(q["choices"]), q["correct"])
 
 async def init_guild_data(guild_id):
     async with pool.acquire() as conn:
@@ -65,12 +74,13 @@ async def on_ready():
     await refresh_trivia()
     for guild in bot.guilds:
         await init_guild_data(guild.id)
-    await tree.sync()
+        await tree.sync(guild=guild)
     print(f"Logged in as {bot.user}")
 
 @bot.event
 async def on_guild_join(guild):
     await init_guild_data(guild.id)
+    await tree.sync(guild=guild)
 
 @bot.event
 async def on_message(message):
@@ -96,7 +106,7 @@ async def on_message(message):
                 await conn.execute(f"INSERT INTO guild_{message.guild.id}_counting (channel_id, last_number) VALUES ($1, $2)", message.channel.id, result)
         else:
             await conn.execute(f"UPDATE guild_{message.guild.id}_counting SET last_number = 0 WHERE channel_id = $1", message.channel.id)
-            await message.channel.send(f"❌ Wrong number or math! `{expr}` is not next. Restarting from 1.")
+            await message.channel.send(f"❌ Wrong number! Restarting from 1.")
 
 @tree.command(name="addchannel", description="Add this channel as a counting channel")
 async def addchannel(interaction: discord.Interaction):
@@ -127,7 +137,7 @@ async def daily(interaction: discord.Interaction):
 
         if row:
             if row["last_daily"] and now - row["last_daily"] < timedelta(hours=24):
-                await interaction.response.send_message("⏱️ You already claimed your daily reward!", ephemeral=True)
+                await interaction.response.send_message("⏳ You already claimed your daily reward today!", ephemeral=True)
                 return
             new_balance = row["balance"] + 100
             await conn.execute(f"""
@@ -141,7 +151,7 @@ async def daily(interaction: discord.Interaction):
                 VALUES ($1, 100, $2)
             """, interaction.user.id, now)
 
-        await interaction.response.send_message("🎉 You claimed 100 coins!", ephemeral=True)
+        await interaction.response.send_message("💰 You claimed 100 coins!", ephemeral=True)
 
 @tree.command(name="balance", description="Check your balance")
 async def balance(interaction: discord.Interaction):
@@ -152,38 +162,50 @@ async def balance(interaction: discord.Interaction):
         amount = row["balance"] if row else 0
         await interaction.response.send_message(f"💰 You have {amount} coins.", ephemeral=True)
 
-@tree.command(name="leaderboard", description="Show top balances")
+@tree.command(name="leaderboard", description="Show top users by coin balance")
 async def leaderboard(interaction: discord.Interaction):
     async with pool.acquire() as conn:
         rows = await conn.fetch(f"""
-            SELECT user_id, balance FROM guild_{interaction.guild.id}_users ORDER BY balance DESC LIMIT 10
+            SELECT user_id, balance FROM guild_{interaction.guild.id}_users
+            ORDER BY balance DESC
+            LIMIT 10
         """)
-    embed = discord.Embed(title="🏆 Leaderboard", color=discord.Color.gold())
-    for i, row in enumerate(rows, start=1):
-        user = await bot.fetch_user(row["user_id"])
-        embed.add_field(name=f"#{i} - {user.name}", value=f"{row['balance']} coins", inline=False)
+    description = ""
+    for i, row in enumerate(rows, 1):
+        user = interaction.guild.get_member(row["user_id"])
+        name = user.display_name if user else f"<@{row['user_id']}>"
+        description += f"**#{i}** — {name}: {row['balance']} coins\n"
+    embed = discord.Embed(title="🏆 Leaderboard", description=description or "No one is on the board yet!")
     await interaction.response.send_message(embed=embed)
 
 @tree.command(name="trivia", description="Answer a trivia question!")
 async def trivia(interaction: discord.Interaction):
+    import random
     q = random.choice(trivia_questions)
     correct = q["correct"]
+
     class TriviaView(discord.ui.View):
         def __init__(self):
             super().__init__(timeout=30)
             for key, value in q["choices"].items():
                 self.add_item(discord.ui.Button(label=value, custom_id=key))
 
+        @discord.ui.button(label="Another Question", style=discord.ButtonStyle.secondary, row=1)
+        async def another(self, interaction_btn: discord.Interaction, button: discord.ui.Button):
+            await trivia(interaction_btn)
+
         async def interaction_check(self, i: discord.Interaction) -> bool:
             chosen = i.data['custom_id']
             if chosen == correct:
                 await i.response.send_message("✅ Correct!", ephemeral=True)
             else:
-                await i.response.send_message(f"❌ Wrong! The correct answer was **{correct}**.", ephemeral=True)
+                correct_text = q["choices"][correct]
+                await i.response.send_message(f"❌ Wrong! The correct answer was: {correct_text}", ephemeral=True)
             self.stop()
             return True
 
-    embed = discord.Embed(title="🧠 Trivia", description=q["question"], color=discord.Color.blue())
+    embed = discord.Embed(title=q["question"])
     await interaction.response.send_message(embed=embed, view=TriviaView(), ephemeral=True)
 
-bot.run(DISCORD_TOKEN)
+bot.run(os.environ["DISCORD_TOKEN"])
+
