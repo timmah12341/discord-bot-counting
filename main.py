@@ -1,9 +1,10 @@
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 from discord import app_commands
 import asyncpg
 import json
 import os
+import math
 from datetime import datetime, timedelta
 
 intents = discord.Intents.default()
@@ -18,7 +19,13 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 pool = None
 trivia_questions = []
 
-# Load trivia.json
+safe_globals = {
+    "__builtins__": {},
+    "math": math,
+    "pi": math.pi,
+    "e": math.e
+}
+
 async def refresh_trivia():
     global trivia_questions
     with open("trivia.json", "r") as f:
@@ -38,23 +45,22 @@ async def refresh_trivia():
                 INSERT INTO trivia_questions (question, choices, correct) VALUES ($1, $2, $3)
             """, q["question"], json.dumps(q["choices"]), q["correct"])
 
-# Create per-server tables
 async def init_guild_data(guild_id):
     async with pool.acquire() as conn:
         await conn.execute(f"""
             CREATE TABLE IF NOT EXISTS guild_{guild_id}_counting (
-                channel_id BIGINT
-            );
+                channel_id BIGINT PRIMARY KEY,
+                last_number DOUBLE PRECISION DEFAULT 0
+            )
         """)
         await conn.execute(f"""
             CREATE TABLE IF NOT EXISTS guild_{guild_id}_users (
                 user_id BIGINT PRIMARY KEY,
                 balance INTEGER DEFAULT 0,
                 last_daily TIMESTAMP
-            );
+            )
         """)
 
-# Database pool
 @bot.event
 async def on_ready():
     global pool
@@ -69,86 +75,114 @@ async def on_ready():
 async def on_guild_join(guild):
     await init_guild_data(guild.id)
 
-# Counting message handler
 @bot.event
 async def on_message(message):
-    if message.author.bot:
+    if message.author.bot or not message.guild:
         return
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(f"SELECT channel_id FROM guild_{message.guild.id}_counting")
-        if not rows:
+    try:
+        expr = message.content.strip()
+        result = eval(expr, safe_globals)
+        if not isinstance(result, (int, float)):
             return
-        channel_ids = [row["channel_id"] for row in rows]
-        if message.channel.id not in channel_ids:
-            return
-        content = message.content.strip()
-        try:
-            user_number = eval(content, {"__builtins__": {}})
-            if int(user_number) % 2 == 1:
-                await message.channel.send(f"{int(user_number)+1}")
-        except:
-            pass
+        result = round(result, 6)
+    except:
+        return
 
-# /addchannel command
-@tree.command(name="addchannel", description="Add a counting channel")
-async def addchannel(interaction: discord.Interaction):
     async with pool.acquire() as conn:
-        await conn.execute(f"INSERT INTO guild_{interaction.guild.id}_counting (channel_id) VALUES ($1) ON CONFLICT DO NOTHING", interaction.channel_id)
+        row = await conn.fetchrow(f"SELECT * FROM guild_{message.guild.id}_counting WHERE channel_id = $1", message.channel.id)
+        last = row["last_number"] if row else 0
+
+        if (result == last + 1) or (last == 0 and result == 1):
+            # valid count
+            if row:
+                await conn.execute(f"UPDATE guild_{message.guild.id}_counting SET last_number = $1 WHERE channel_id = $2", result, message.channel.id)
+            else:
+                await conn.execute(f"INSERT INTO guild_{message.guild.id}_counting (channel_id, last_number) VALUES ($1, $2)", message.channel.id, result)
+        else:
+            # mistake - restart to 1
+            await conn.execute(f"UPDATE guild_{message.guild.id}_counting SET last_number = 0 WHERE channel_id = $1", message.channel.id)
+            await message.channel.send(f"Wrong number! Restarting from 1.")
+
+@tree.command(name="addchannel", description="Add this channel as a counting channel")
+async def addchannel(interaction: discord.Interaction):
+    await init_guild_data(interaction.guild.id)
+    async with pool.acquire() as conn:
+        await conn.execute(f"""
+            INSERT INTO guild_{interaction.guild.id}_counting (channel_id, last_number)
+            VALUES ($1, 0)
+            ON CONFLICT (channel_id) DO NOTHING
+        """, interaction.channel_id)
     await interaction.response.send_message("This channel is now a counting channel!", ephemeral=True)
 
-# /removechannel command
 @tree.command(name="removechannel", description="Remove this counting channel")
 async def removechannel(interaction: discord.Interaction):
     async with pool.acquire() as conn:
-        await conn.execute(f"DELETE FROM guild_{interaction.guild.id}_counting WHERE channel_id = $1", interaction.channel_id)
+        await conn.execute(f"""
+            DELETE FROM guild_{interaction.guild.id}_counting WHERE channel_id = $1
+        """, interaction.channel_id)
     await interaction.response.send_message("This channel is no longer a counting channel.", ephemeral=True)
 
-# /daily command
 @tree.command(name="daily", description="Claim your daily reward")
 async def daily(interaction: discord.Interaction):
     async with pool.acquire() as conn:
         now = datetime.utcnow()
-        row = await conn.fetchrow(f"SELECT balance, last_daily FROM guild_{interaction.guild.id}_users WHERE user_id = $1", interaction.user.id)
+        row = await conn.fetchrow(f"""
+            SELECT balance, last_daily FROM guild_{interaction.guild.id}_users WHERE user_id = $1
+        """, interaction.user.id)
+
         if row:
             if row["last_daily"] and now - row["last_daily"] < timedelta(hours=24):
                 await interaction.response.send_message("You've already claimed your daily reward today!", ephemeral=True)
                 return
             new_balance = row["balance"] + 100
             await conn.execute(f"""
-                UPDATE guild_{interaction.guild.id}_users SET balance = $1, last_daily = $2 WHERE user_id = $3
+                UPDATE guild_{interaction.guild.id}_users
+                SET balance = $1, last_daily = $2
+                WHERE user_id = $3
             """, new_balance, now, interaction.user.id)
         else:
             await conn.execute(f"""
-                INSERT INTO guild_{interaction.guild.id}_users (user_id, balance, last_daily) VALUES ($1, 100, $2)
+                INSERT INTO guild_{interaction.guild.id}_users (user_id, balance, last_daily)
+                VALUES ($1, 100, $2)
             """, interaction.user.id, now)
+
         await interaction.response.send_message("You claimed 100 coins!", ephemeral=True)
 
-# /balance command
 @tree.command(name="balance", description="Check your balance")
 async def balance(interaction: discord.Interaction):
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(f"SELECT balance FROM guild_{interaction.guild.id}_users WHERE user_id = $1", interaction.user.id)
-        if row:
-            await interaction.response.send_message(f"You have {row['balance']} coins.", ephemeral=True)
-        else:
-            await interaction.response.send_message("You have 0 coins.", ephemeral=True)
+        row = await conn.fetchrow(f"""
+            SELECT balance FROM guild_{interaction.guild.id}_users WHERE user_id = $1
+        """, interaction.user.id)
+        amount = row["balance"] if row else 0
+        await interaction.response.send_message(f"You have {amount} coins.", ephemeral=True)
 
-# /trivia command
 @tree.command(name="trivia", description="Answer a trivia question!")
 async def trivia(interaction: discord.Interaction):
     import random
     q = random.choice(trivia_questions)
     correct = q["correct"]
-    view = discord.ui.View()
-    for key, choice in q["choices"].items():
-        async def callback(interaction_inner, k=key):
-            if k == correct:
-                await interaction_inner.response.send_message("Correct!", ephemeral=True)
+
+    class TriviaView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=30)
+            for key, value in q["choices"].items():
+                self.add_item(discord.ui.Button(label=value, custom_id=key))
+
+        @discord.ui.button(label="Another Question", style=discord.ButtonStyle.secondary, row=1)
+        async def another(self, interaction_btn: discord.Interaction, button: discord.ui.Button):
+            await trivia(interaction_btn)
+
+        async def interaction_check(self, i: discord.Interaction) -> bool:
+            chosen = i.data['custom_id']
+            if chosen == correct:
+                await i.response.send_message("Correct!", ephemeral=True)
             else:
-                await interaction_inner.response.send_message(f"Wrong! The correct answer was {correct}", ephemeral=True)
-        button = discord.ui.Button(label=choice, style=discord.ButtonStyle.blurple)
-        button.callback = callback
-        view.add_item(button)
-    await interaction.response.send_message(embed=discord.Embed(title=q["question"]), view=view, ephemeral=True)
+                await i.response.send_message(f"Wrong! The correct answer was: {correct}", ephemeral=True)
+            self.stop()
+            return True
+
+    embed = discord.Embed(title=q["question"])
+    await interaction.response.send_message(embed=embed, view=TriviaView(), ephemeral=True)
 
 bot.run(os.environ["DISCORD_TOKEN"])
