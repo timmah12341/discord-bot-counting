@@ -1,211 +1,246 @@
+import os
 import discord
-from discord.ext import commands
-from discord import app_commands
 import asyncpg
 import json
-import os
+import random
 import math
+from discord.ext import commands
+from discord import app_commands
 from datetime import datetime, timedelta
 
-intents = discord.Intents.default()
-intents.messages = True
-intents.guilds = True
-intents.message_content = True
+TOKEN = os.getenv("DISCORD_TOKEN")
+DB_URL = os.getenv("DATABASE_URL")
 
+intents = discord.Intents.default()
+intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
-DATABASE_URL = os.environ["DATABASE_URL"]
-pool = None
-trivia_questions = []
+# Load trivia
+with open("trivia.json") as f:
+    trivia_data = json.load(f)
 
-safe_globals = {
-    "__builtins__": {},
-    "math": math,
-    "pi": math.pi,
-    "e": math.e,
-    "sqrt": math.sqrt,
-    "sin": math.sin,
-    "cos": math.cos,
-    "tan": math.tan,
-    "log": math.log,
-    "log10": math.log10
-}
-
-async def refresh_trivia():
-    global trivia_questions
-    with open("trivia.json", "r") as f:
-        trivia_questions = json.load(f)
-    async with pool.acquire() as conn:
-        await conn.execute("DROP TABLE IF EXISTS trivia_questions")
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS trivia_questions (
-                id SERIAL PRIMARY KEY,
-                question TEXT,
-                choices JSONB,
-                correct TEXT
-            )
-        """)
-        for q in trivia_questions:
-            await conn.execute("""
-                INSERT INTO trivia_questions (question, choices, correct) VALUES ($1, $2, $3)
-            """, q["question"], json.dumps(q["choices"]), q["correct"])
-
-async def init_guild_data(guild_id):
-    async with pool.acquire() as conn:
-        await conn.execute(f"""
-            CREATE TABLE IF NOT EXISTS guild_{guild_id}_counting (
-                channel_id BIGINT PRIMARY KEY,
-                last_number DOUBLE PRECISION DEFAULT 0
-            )
-        """)
-        await conn.execute(f"""
-            CREATE TABLE IF NOT EXISTS guild_{guild_id}_users (
-                user_id BIGINT PRIMARY KEY,
-                balance INTEGER DEFAULT 0,
-                last_daily TIMESTAMP
-            )
-        """)
+# Connect to PostgreSQL
+async def get_db():
+    return await asyncpg.connect(DB_URL)
 
 @bot.event
 async def on_ready():
-    global pool
-    pool = await asyncpg.create_pool(DATABASE_URL)
-    await refresh_trivia()
-    for guild in bot.guilds:
-        await init_guild_data(guild.id)
-        await tree.sync(guild=guild)
     print(f"Logged in as {bot.user}")
+    try:
+        await tree.sync()
+    except Exception as e:
+        print("Sync error:", e)
 
-@bot.event
-async def on_guild_join(guild):
-    await init_guild_data(guild.id)
-    await tree.sync(guild=guild)
-
+# ========================
+# COUNTING EVENT HANDLER
+# ========================
 @bot.event
 async def on_message(message):
     if message.author.bot or not message.guild:
         return
-    try:
-        expr = message.content.strip()
-        result = eval(expr, safe_globals)
-        if not isinstance(result, (int, float)):
-            return
-        result = round(result, 6)
-    except:
+
+    conn = await get_db()
+    await conn.execute(f"""
+        CREATE TABLE IF NOT EXISTS guild_{message.guild.id}_counting (
+            channel_id BIGINT PRIMARY KEY,
+            last_number DOUBLE PRECISION,
+            last_user_id BIGINT
+        )
+    """)
+    data = await conn.fetchrow(f"SELECT * FROM guild_{message.guild.id}_counting WHERE channel_id = $1", message.channel.id)
+
+    if data is None:
+        await conn.execute(f"INSERT INTO guild_{message.guild.id}_counting (channel_id, last_number, last_user_id) VALUES ($1, 0, 0)", message.channel.id)
+        await conn.close()
         return
 
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(f"SELECT * FROM guild_{message.guild.id}_counting WHERE channel_id = $1", message.channel.id)
-        last = row["last_number"] if row else 0
+    try:
+        expression = message.content.replace("^", "**")
+        number = eval(expression, {"__builtins__": None, "pi": math.pi, "e": math.e, "sqrt": math.sqrt})
+    except:
+        await conn.close()
+        return
 
-        if (result == last + 1) or (last == 0 and result == 1):
-            if row:
-                await conn.execute(f"UPDATE guild_{message.guild.id}_counting SET last_number = $1 WHERE channel_id = $2", result, message.channel.id)
-            else:
-                await conn.execute(f"INSERT INTO guild_{message.guild.id}_counting (channel_id, last_number) VALUES ($1, $2)", message.channel.id, result)
-        else:
-            await conn.execute(f"UPDATE guild_{message.guild.id}_counting SET last_number = 0 WHERE channel_id = $1", message.channel.id)
-            await message.channel.send(f"❌ Wrong number! Restarting from 1.")
+    if not isinstance(number, (int, float)):
+        await conn.close()
+        return
 
-@tree.command(name="addchannel", description="Add this channel as a counting channel")
-async def addchannel(interaction: discord.Interaction):
-    await init_guild_data(interaction.guild.id)
-    async with pool.acquire() as conn:
+    expected = data["last_number"] + 1
+    if number == expected and message.author.id != data["last_user_id"]:
         await conn.execute(f"""
-            INSERT INTO guild_{interaction.guild.id}_counting (channel_id, last_number)
-            VALUES ($1, 0)
-            ON CONFLICT (channel_id) DO NOTHING
-        """, interaction.channel.id)
-    await interaction.response.send_message("✅ This channel is now a counting channel!", ephemeral=True)
+            UPDATE guild_{message.guild.id}_counting
+            SET last_number = $1, last_user_id = $2
+            WHERE channel_id = $3
+        """, number, message.author.id, message.channel.id)
+        await conn.execute("""
+            INSERT INTO users (user_id, balance)
+            VALUES ($1, 1)
+            ON CONFLICT (user_id) DO UPDATE SET balance = users.balance + 1
+        """, message.author.id)
+        await message.channel.send(embed=discord.Embed(
+            description=f"✅ {message.author.mention} counted **{number}**!",
+            color=discord.Color.green()
+        ))
+    else:
+        await message.channel.send(embed=discord.Embed(
+            description=f"❌ Wrong number, {message.author.mention}! Expected **{expected}**.",
+            color=discord.Color.red()
+        ))
 
-@tree.command(name="removechannel", description="Remove this channel from counting")
-async def removechannel(interaction: discord.Interaction):
-    async with pool.acquire() as conn:
-        await conn.execute(f"""
-            DELETE FROM guild_{interaction.guild.id}_counting WHERE channel_id = $1
-        """, interaction.channel.id)
-    await interaction.response.send_message("❌ This channel is no longer a counting channel.", ephemeral=True)
+    await conn.close()
 
-@tree.command(name="daily", description="Claim your daily reward")
-async def daily(interaction: discord.Interaction):
-    async with pool.acquire() as conn:
-        now = datetime.utcnow()
-        row = await conn.fetchrow(f"""
-            SELECT balance, last_daily FROM guild_{interaction.guild.id}_users WHERE user_id = $1
-        """, interaction.user.id)
+# ========================
+# POSTGRES SETUP
+# ========================
+@bot.event
+async def on_connect():
+    conn = await get_db()
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id BIGINT PRIMARY KEY,
+            balance INTEGER DEFAULT 0,
+            last_daily TIMESTAMP
+        )
+    """)
+    await conn.close()
 
-        if row:
-            if row["last_daily"] and now - row["last_daily"] < timedelta(hours=24):
-                await interaction.response.send_message("⏳ You already claimed your daily reward today!", ephemeral=True)
-                return
-            new_balance = row["balance"] + 100
-            await conn.execute(f"""
-                UPDATE guild_{interaction.guild.id}_users
-                SET balance = $1, last_daily = $2
-                WHERE user_id = $3
-            """, new_balance, now, interaction.user.id)
-        else:
-            await conn.execute(f"""
-                INSERT INTO guild_{interaction.guild.id}_users (user_id, balance, last_daily)
-                VALUES ($1, 100, $2)
-            """, interaction.user.id, now)
+# ========================
+# SLASH COMMANDS
+# ========================
+@tree.command(name="addchannel", description="Add a counting channel")
+async def addchannel(interaction: discord.Interaction, channel: discord.TextChannel):
+    conn = await get_db()
+    await conn.execute(f"""
+        CREATE TABLE IF NOT EXISTS guild_{interaction.guild.id}_counting (
+            channel_id BIGINT PRIMARY KEY,
+            last_number DOUBLE PRECISION,
+            last_user_id BIGINT
+        )
+    """)
+    await conn.execute(f"""
+        INSERT INTO guild_{interaction.guild.id}_counting (channel_id, last_number, last_user_id)
+        VALUES ($1, 0, 0)
+        ON CONFLICT (channel_id) DO NOTHING
+    """, channel.id)
+    await conn.close()
+    await interaction.response.send_message(f"✅ {channel.mention} added as a counting channel!", ephemeral=True)
 
-        await interaction.response.send_message("💰 You claimed 100 coins!", ephemeral=True)
+@tree.command(name="removechannel", description="Remove a counting channel")
+async def removechannel(interaction: discord.Interaction, channel: discord.TextChannel):
+    conn = await get_db()
+    await conn.execute(f"""
+        DELETE FROM guild_{interaction.guild.id}_counting WHERE channel_id = $1
+    """, channel.id)
+    await conn.close()
+    await interaction.response.send_message(f"❌ {channel.mention} removed from counting channels.", ephemeral=True)
 
 @tree.command(name="balance", description="Check your balance")
 async def balance(interaction: discord.Interaction):
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(f"""
-            SELECT balance FROM guild_{interaction.guild.id}_users WHERE user_id = $1
-        """, interaction.user.id)
-        amount = row["balance"] if row else 0
-        await interaction.response.send_message(f"💰 You have {amount} coins.", ephemeral=True)
+    conn = await get_db()
+    row = await conn.fetchrow("SELECT balance FROM users WHERE user_id = $1", interaction.user.id)
+    bal = row["balance"] if row else 0
+    await interaction.response.send_message(embed=discord.Embed(
+        title="💰 Balance",
+        description=f"{interaction.user.mention}, you have **{bal} coins**.",
+        color=discord.Color.gold()
+    ), ephemeral=True)
+    await conn.close()
 
-@tree.command(name="leaderboard", description="Show top users by coin balance")
+@tree.command(name="daily", description="Claim your daily reward")
+async def daily(interaction: discord.Interaction):
+    conn = await get_db()
+    user = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", interaction.user.id)
+    now = datetime.utcnow()
+
+    if user and user["last_daily"]:
+        last_claim = user["last_daily"]
+        if now - last_claim < timedelta(hours=24):
+            remaining = timedelta(hours=24) - (now - last_claim)
+            await interaction.response.send_message(f"🕒 Come back in {str(remaining).split('.')[0]}!", ephemeral=True)
+            await conn.close()
+            return
+
+    await conn.execute("""
+        INSERT INTO users (user_id, balance, last_daily)
+        VALUES ($1, 500, $2)
+        ON CONFLICT (user_id)
+        DO UPDATE SET balance = users.balance + 500, last_daily = $2
+    """, interaction.user.id, now)
+
+    await interaction.response.send_message(embed=discord.Embed(
+        title="🎁 Daily Reward",
+        description=f"{interaction.user.mention}, you received **500 coins**!",
+        color=discord.Color.blue()
+    ), ephemeral=True)
+    await conn.close()
+
+@tree.command(name="leaderboard", description="Top balances")
 async def leaderboard(interaction: discord.Interaction):
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(f"""
-            SELECT user_id, balance FROM guild_{interaction.guild.id}_users
-            ORDER BY balance DESC
-            LIMIT 10
-        """)
-    description = ""
-    for i, row in enumerate(rows, 1):
-        user = interaction.guild.get_member(row["user_id"])
-        name = user.display_name if user else f"<@{row['user_id']}>"
-        description += f"**#{i}** — {name}: {row['balance']} coins\n"
-    embed = discord.Embed(title="🏆 Leaderboard", description=description or "No one is on the board yet!")
-    await interaction.response.send_message(embed=embed)
+    conn = await get_db()
+    rows = await conn.fetch("SELECT user_id, balance FROM users ORDER BY balance DESC LIMIT 10")
+    embed = discord.Embed(title="🏆 Leaderboard", color=discord.Color.purple())
+    for i, row in enumerate(rows, start=1):
+        user = await bot.fetch_user(row["user_id"])
+        embed.add_field(name=f"{i}. {user}", value=f"{row['balance']} coins", inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await conn.close()
+
+@tree.command(name="profile", description="View your profile")
+async def profile(interaction: discord.Interaction):
+    conn = await get_db()
+    row = await conn.fetchrow("SELECT balance FROM users WHERE user_id = $1", interaction.user.id)
+    bal = row["balance"] if row else 0
+    embed = discord.Embed(
+        title="📄 Profile",
+        description=f"**User:** {interaction.user.mention}\n**Balance:** {bal} coins",
+        color=discord.Color.blurple()
+    )
+    embed.set_thumbnail(url=interaction.user.display_avatar.url)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await conn.close()
 
 @tree.command(name="trivia", description="Answer a trivia question!")
 async def trivia(interaction: discord.Interaction):
-    import random
-    q = random.choice(trivia_questions)
-    correct = q["correct"]
+    question = random.choice(trivia_data)
+    choices = question["choices"]
+    correct_key = question["correct"]
+    correct_answer = choices[correct_key]
 
-    class TriviaView(discord.ui.View):
-        def __init__(self):
-            super().__init__(timeout=30)
-            for key, value in q["choices"].items():
-                self.add_item(discord.ui.Button(label=value, custom_id=key))
+    buttons = []
+    for key, value in choices.items():
+        buttons.append(discord.ui.Button(label=value, style=discord.ButtonStyle.secondary, custom_id=key))
 
-        @discord.ui.button(label="Another Question", style=discord.ButtonStyle.secondary, row=1)
-        async def another(self, interaction_btn: discord.Interaction, button: discord.ui.Button):
-            await trivia(interaction_btn)
+    view = discord.ui.View()
+    for button in buttons:
+        view.add_item(button)
 
-        async def interaction_check(self, i: discord.Interaction) -> bool:
-            chosen = i.data['custom_id']
-            if chosen == correct:
-                await i.response.send_message("✅ Correct!", ephemeral=True)
-            else:
-                correct_text = q["choices"][correct]
-                await i.response.send_message(f"❌ Wrong! The correct answer was: {correct_text}", ephemeral=True)
-            self.stop()
-            return True
+    async def button_callback(interact: discord.Interaction):
+        if interact.user.id != interaction.user.id:
+            await interact.response.send_message("This isn't your trivia question!", ephemeral=True)
+            return
+        if interact.data["custom_id"] == correct_key:
+            await interact.response.edit_message(embed=discord.Embed(
+                description=f"✅ Correct! **{choices[correct_key]}** is right.",
+                color=discord.Color.green()
+            ), view=None)
+            conn = await get_db()
+            await conn.execute("""
+                INSERT INTO users (user_id, balance)
+                VALUES ($1, 100)
+                ON CONFLICT (user_id) DO UPDATE SET balance = users.balance + 100
+            """, interaction.user.id)
+            await conn.close()
+        else:
+            await interact.response.edit_message(embed=discord.Embed(
+                description=f"❌ Wrong! Correct answer was **{choices[correct_key]}**.",
+                color=discord.Color.red()
+            ), view=None)
 
-    embed = discord.Embed(title=q["question"])
-    await interaction.response.send_message(embed=embed, view=TriviaView(), ephemeral=True)
+    for button in view.children:
+        button.callback = button_callback
 
-bot.run(os.environ["DISCORD_TOKEN"])
+    embed = discord.Embed(title="🧠 Trivia Time!", description=question["question"], color=discord.Color.orange())
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
+bot.run(TOKEN)
