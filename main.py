@@ -1,182 +1,153 @@
 import discord
-from discord.ext import commands
-from discord import app_commands
 import asyncpg
 import os
-import json
-from dotenv import load_dotenv
+from discord.ext import commands
 
-load_dotenv()
+# Initialize bot
+intents = discord.Intents.default()
+bot = commands.Bot(command_prefix='!', intents=intents)
 
-TOKEN = os.getenv("DISCORD_TOKEN")
+# Load environment variables
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-intents = discord.Intents.default()
-intents.message_content = True
-intents.typing = False
-
-bot = commands.Bot(command_prefix="!", intents=intents)
-
 # Connect to PostgreSQL database
-async def get_db_connection():
-    return await asyncpg.connect(DATABASE_URL)
+async def connect_db():
+    conn = await asyncpg.connect(DATABASE_URL)
+    return conn
 
-# Add counting channel command
-@bot.tree.command(name="addchannel")
-@app_commands.describe(channel="The channel to add to the counting system.")
-async def addchannel(interaction: discord.Interaction, channel: discord.TextChannel):
-    conn = await get_db_connection()
-    guild_id = interaction.guild.id
+# Function to check and add the 'last_number' column if missing
+async def ensure_last_number_column(conn, guild_id):
     try:
-        # Creating the table if it doesn't exist for the guild
-        await conn.execute(f"""
-            CREATE TABLE IF NOT EXISTS guild_{guild_id}_counting (
-                channel_id BIGINT PRIMARY KEY,
-                last_number INT DEFAULT 0
-            )
+        # Check if the column exists
+        result = await conn.fetch(f"""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = 'guild_{guild_id}_counting' AND column_name = 'last_number';
         """)
-        # Inserting the channel into the database
-        await conn.execute(f"""
-            INSERT INTO guild_{guild_id}_counting (channel_id) 
-            VALUES ($1) 
-            ON CONFLICT (channel_id) DO NOTHING
-        """, channel.id)
-        
-        await interaction.response.send_message(f"Channel {channel.mention} added to the counting system!")
-    except Exception as e:
-        await interaction.response.send_message(f"Error adding channel: {str(e)}")
-    finally:
-        await conn.close()
 
-# Remove counting channel command
-@bot.tree.command(name="removechannel")
-@app_commands.describe(channel="The channel to remove from the counting system.")
-async def removechannel(interaction: discord.Interaction, channel: discord.TextChannel):
-    conn = await get_db_connection()
-    guild_id = interaction.guild.id
+        # If the column doesn't exist, add it
+        if not result:
+            print(f"'last_number' column not found. Adding the column.")
+            await conn.execute(f"""
+                ALTER TABLE guild_{guild_id}_counting ADD COLUMN last_number INTEGER DEFAULT 0;
+            """)
+            print(f"'last_number' column added successfully.")
+    except Exception as e:
+        print(f"Error ensuring 'last_number' column: {e}")
+
+# Command to add a counting channel to the database
+@bot.command()
+async def addchannel(ctx, channel: discord.TextChannel):
     try:
-        # Removing the channel from the counting system
-        await conn.execute(f"DELETE FROM guild_{guild_id}_counting WHERE channel_id = $1", channel.id)
-        await interaction.response.send_message(f"Channel {channel.mention} removed from the counting system!")
+        conn = await connect_db()
+        guild_id = ctx.guild.id
+        channel_id = channel.id
+
+        # Ensure that the last_number column exists
+        await ensure_last_number_column(conn, guild_id)
+
+        # Check if the channel already exists
+        existing_channel = await conn.fetchrow(f"""
+            SELECT * FROM guild_{guild_id}_counting WHERE channel_id = $1
+        """, channel_id)
+
+        if existing_channel:
+            await ctx.send(f"This channel is already set for counting!")
+        else:
+            await conn.execute(f"""
+                INSERT INTO guild_{guild_id}_counting (channel_id, last_number)
+                VALUES ($1, 0)
+            """, channel_id)
+            await ctx.send(f"Counting has been added for channel {channel.mention}!")
     except Exception as e:
-        await interaction.response.send_message(f"Error removing channel: {str(e)}")
+        await ctx.send(f"Error while adding the channel: {e}")
     finally:
         await conn.close()
 
-# Shop command
-@bot.tree.command(name="shop")
-async def shop(interaction: discord.Interaction):
-    conn = await get_db_connection()
-    guild_id = interaction.guild.id
-    
-    # Example items
-    items = [
-        {"name": "Mystery Box", "description": "A random surprise!", "price": 100},
-        {"name": "Super Role", "description": "A super cool role", "price": 500}
-    ]
-    
-    shop_embed = discord.Embed(title="Shop", description="Browse the available items.", color=discord.Color.blue())
-    for item in items:
-        shop_embed.add_field(name=item["name"], value=f"{item['description']} - {item['price']} coins", inline=False)
-    
-    # Sending the shop embed with buy buttons
-    view = discord.ui.View()
-    for item in items:
-        button = discord.ui.Button(label=f"Buy {item['name']}", custom_id=f"buy_{item['name'].lower().replace(' ', '_')}")
-        view.add_item(button)
-    
-    await interaction.response.send_message(embed=shop_embed, view=view)
+# Command to remove a counting channel from the database
+@bot.command()
+async def removechannel(ctx, channel: discord.TextChannel):
+    try:
+        conn = await connect_db()
+        guild_id = ctx.guild.id
+        channel_id = channel.id
 
-    # Close the connection
-    await conn.close()
+        # Remove the counting channel
+        await conn.execute(f"""
+            DELETE FROM guild_{guild_id}_counting WHERE channel_id = $1
+        """, channel_id)
+        await ctx.send(f"Counting has been removed for channel {channel.mention}!")
+    except Exception as e:
+        await ctx.send(f"Error while removing the channel: {e}")
+    finally:
+        await conn.close()
 
-# Button handler for shop purchases
-@bot.event
-async def on_interaction(interaction: discord.Interaction):
-    if interaction.type == discord.InteractionType.component:
-        if interaction.custom_id.startswith("buy_"):
-            item_name = interaction.custom_id.split("_", 1)[1].replace("_", " ").title()
-            await interaction.response.send_message(f"You've bought a {item_name}!", ephemeral=True)
-
-# Counting feature
+# Listen to messages for counting
 @bot.event
 async def on_message(message):
-    if message.channel.id not in [channel.id for channel in message.guild.text_channels]:
+    if message.author.bot:
         return
-    
-    conn = await get_db_connection()
-    guild_id = message.guild.id
-    
-    # Check if the channel is in the counting system
-    result = await conn.fetchrow(f"SELECT last_number FROM guild_{guild_id}_counting WHERE channel_id = $1", message.channel.id)
-    
-    if result:
-        last_number = result["last_number"]
-        try:
-            number = int(message.content)
-            if number == last_number + 1:
-                await conn.execute(f"UPDATE guild_{guild_id}_counting SET last_number = $1 WHERE channel_id = $2", number, message.channel.id)
-            else:
-                await message.channel.send(f"Oops! The next number should be {last_number + 1}. Try again!")
-        except ValueError:
-            await message.channel.send("Please only send numbers!")
-    
-    await conn.close()
 
-# Leaderboard command
-@bot.tree.command(name="leaderboard")
-async def leaderboard(interaction: discord.Interaction):
-    conn = await get_db_connection()
-    guild_id = interaction.guild.id
-    
-    # Fetching all users and their scores
-    results = await conn.fetch(f"SELECT user_id, score FROM guild_{guild_id}_leaderboard ORDER BY score DESC LIMIT 10")
-    
-    leaderboard_embed = discord.Embed(title="Leaderboard", color=discord.Color.green())
-    for idx, result in enumerate(results, 1):
-        user = await bot.fetch_user(result["user_id"])
-        leaderboard_embed.add_field(name=f"{idx}. {user.name}", value=f"Score: {result['score']}", inline=False)
-    
-    await interaction.response.send_message(embed=leaderboard_embed)
+    try:
+        guild_id = message.guild.id
+        channel_id = message.channel.id
 
-    await conn.close()
+        conn = await connect_db()
 
-# Daily command
-@bot.tree.command(name="daily")
-async def daily(interaction: discord.Interaction):
-    conn = await get_db_connection()
-    guild_id = interaction.guild.id
-    user_id = interaction.user.id
-    
-    # Add daily reward logic here (e.g., increment balance)
-    # For now, just a placeholder message
-    await conn.execute(f"INSERT INTO guild_{guild_id}_users (user_id, balance) VALUES ($1, 0) ON CONFLICT (user_id) DO NOTHING")
-    
-    await interaction.response.send_message("You have claimed your daily reward!")
+        # Ensure that the last_number column exists
+        await ensure_last_number_column(conn, guild_id)
 
-    await conn.close()
+        # Fetch the last number from the database for the current channel
+        result = await conn.fetchrow(f"""
+            SELECT last_number FROM guild_{guild_id}_counting WHERE channel_id = $1
+        """, channel_id)
 
-# Balance command
-@bot.tree.command(name="balance")
-async def balance(interaction: discord.Interaction):
-    conn = await get_db_connection()
-    guild_id = interaction.guild.id
-    user_id = interaction.user.id
-    
-    # Fetch the user's balance
-    result = await conn.fetchrow(f"SELECT balance FROM guild_{guild_id}_users WHERE user_id = $1", user_id)
-    if result:
-        balance = result["balance"]
-        await interaction.response.send_message(f"Your balance: {balance} coins")
-    else:
-        await interaction.response.send_message("You don't have an account. Use the /daily command to create one!")
-    
-    await conn.close()
+        if result:
+            last_number = result['last_number']
+            # Logic for counting based on the last_number
+            if message.content.isdigit():
+                num = int(message.content)
+                if num == last_number + 1:
+                    # Update the last_number in the database
+                    await conn.execute(f"""
+                        UPDATE guild_{guild_id}_counting
+                        SET last_number = $1
+                        WHERE channel_id = $2
+                    """, num, channel_id)
+                    await message.add_reaction('✅')
+                else:
+                    await message.add_reaction('❌')
 
-# On bot ready event
-@bot.event
-async def on_ready():
-    print(f"{bot.user} has connected to Discord!")
+        else:
+            print(f"No counting data found for channel {channel_id} in guild {guild_id}.")
+    except Exception as e:
+        print(f"Error in on_message: {e}")
+    finally:
+        await conn.close()
 
-# Running the bot
-bot.run(TOKEN)
+# Add a new shop item (simplified)
+@bot.command()
+async def shop(ctx):
+    try:
+        conn = await connect_db()
+        guild_id = ctx.guild.id
+
+        # Example items, extend as needed
+        items = {
+            "Mystery Box": 100,
+            "Rare Item": 500,
+        }
+
+        embed = discord.Embed(title="Shop", description="Buy items with your points!")
+        for item, price in items.items():
+            embed.add_field(name=item, value=f"Price: {price} points", inline=False)
+
+        await ctx.send(embed=embed)
+    except Exception as e:
+        await ctx.send(f"Error fetching the shop: {e}")
+    finally:
+        await conn.close()
+
+# Run the bot
+bot.run(DISCORD_TOKEN)
