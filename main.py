@@ -1,153 +1,106 @@
 import discord
+from discord.ext import commands, tasks
+from discord import app_commands
 import asyncpg
 import os
-from discord.ext import commands
+from datetime import datetime, timedelta
 
-# Initialize bot
 intents = discord.Intents.default()
-bot = commands.Bot(command_prefix='!', intents=intents)
+intents.message_content = True
 
-# Load environment variables
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL")
+bot = commands.Bot(command_prefix="!", intents=intents)
+TOKEN = os.getenv("DISCORD_TOKEN")
 
-# Connect to PostgreSQL database
-async def connect_db():
-    conn = await asyncpg.connect(DATABASE_URL)
-    return conn
+# --- DATABASE ---
+async def create_db_pool():
+    bot.db = await asyncpg.create_pool(dsn=os.getenv("DATABASE_URL"))
+    await bot.db.execute("""
+        CREATE TABLE IF NOT EXISTS counting_channels (
+            guild_id BIGINT,
+            channel_id BIGINT PRIMARY KEY
+        );
+    """)
+    await bot.db.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id BIGINT PRIMARY KEY,
+            balance INTEGER DEFAULT 0,
+            last_daily TIMESTAMP DEFAULT now()
+        );
+    """)
 
-# Function to check and add the 'last_number' column if missing
-async def ensure_last_number_column(conn, guild_id):
-    try:
-        # Check if the column exists
-        result = await conn.fetch(f"""
-            SELECT column_name
-            FROM information_schema.columns
-            WHERE table_name = 'guild_{guild_id}_counting' AND column_name = 'last_number';
-        """)
+# --- ON READY ---
+@bot.event
+async def on_ready():
+    await create_db_pool()
+    await bot.tree.sync()
+    print(f"✅ Logged in as {bot.user}")
 
-        # If the column doesn't exist, add it
-        if not result:
-            print(f"'last_number' column not found. Adding the column.")
-            await conn.execute(f"""
-                ALTER TABLE guild_{guild_id}_counting ADD COLUMN last_number INTEGER DEFAULT 0;
-            """)
-            print(f"'last_number' column added successfully.")
-    except Exception as e:
-        print(f"Error ensuring 'last_number' column: {e}")
+# --- /addchannel ---
+@bot.tree.command(name="addchannel", description="Add this channel to counting")
+async def addchannel(interaction: discord.Interaction):
+    await bot.db.execute(
+        "INSERT INTO counting_channels (guild_id, channel_id) VALUES ($1, $2) ON CONFLICT (channel_id) DO NOTHING",
+        interaction.guild.id, interaction.channel.id
+    )
+    await interaction.response.send_message("✅ This channel is now a counting channel.", ephemeral=True)
 
-# Command to add a counting channel to the database
-@bot.command()
-async def addchannel(ctx, channel: discord.TextChannel):
-    try:
-        conn = await connect_db()
-        guild_id = ctx.guild.id
-        channel_id = channel.id
+# --- /removechannel ---
+@bot.tree.command(name="removechannel", description="Remove this channel from counting")
+async def removechannel(interaction: discord.Interaction):
+    await bot.db.execute(
+        "DELETE FROM counting_channels WHERE channel_id = $1",
+        interaction.channel.id
+    )
+    await interaction.response.send_message("🗑️ Channel removed from counting.", ephemeral=True)
 
-        # Ensure that the last_number column exists
-        await ensure_last_number_column(conn, guild_id)
+# --- /daily ---
+@bot.tree.command(name="daily", description="Claim your daily coins")
+async def daily(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    now = datetime.utcnow()
+    user = await bot.db.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
 
-        # Check if the channel already exists
-        existing_channel = await conn.fetchrow(f"""
-            SELECT * FROM guild_{guild_id}_counting WHERE channel_id = $1
-        """, channel_id)
+    if user is None:
+        await bot.db.execute("INSERT INTO users (user_id, balance, last_daily) VALUES ($1, 100, $2)", user_id, now)
+        await interaction.response.send_message("🌞 You claimed your first daily 100 coins!")
+        return
 
-        if existing_channel:
-            await ctx.send(f"This channel is already set for counting!")
-        else:
-            await conn.execute(f"""
-                INSERT INTO guild_{guild_id}_counting (channel_id, last_number)
-                VALUES ($1, 0)
-            """, channel_id)
-            await ctx.send(f"Counting has been added for channel {channel.mention}!")
-    except Exception as e:
-        await ctx.send(f"Error while adding the channel: {e}")
-    finally:
-        await conn.close()
+    last_claim = user["last_daily"]
+    if now - last_claim < timedelta(hours=24):
+        next_time = last_claim + timedelta(hours=24)
+        await interaction.response.send_message(f"🕒 Come back <t:{int(next_time.timestamp())}:R>.")
+    else:
+        await bot.db.execute(
+            "UPDATE users SET balance = balance + 100, last_daily = $1 WHERE user_id = $2",
+            now, user_id
+        )
+        await interaction.response.send_message("💰 You claimed your 100 daily coins!")
 
-# Command to remove a counting channel from the database
-@bot.command()
-async def removechannel(ctx, channel: discord.TextChannel):
-    try:
-        conn = await connect_db()
-        guild_id = ctx.guild.id
-        channel_id = channel.id
+# --- /balance ---
+@bot.tree.command(name="balance", description="Check your balance")
+async def balance(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    user = await bot.db.fetchrow("SELECT balance FROM users WHERE user_id = $1", user_id)
+    bal = user["balance"] if user else 0
+    await interaction.response.send_message(f"💸 Your balance: **{bal}** coins")
 
-        # Remove the counting channel
-        await conn.execute(f"""
-            DELETE FROM guild_{guild_id}_counting WHERE channel_id = $1
-        """, channel_id)
-        await ctx.send(f"Counting has been removed for channel {channel.mention}!")
-    except Exception as e:
-        await ctx.send(f"Error while removing the channel: {e}")
-    finally:
-        await conn.close()
-
-# Listen to messages for counting
+# --- COUNTING SYSTEM ---
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
 
+    # Check if channel is a counting channel
+    result = await bot.db.fetchval("SELECT 1 FROM counting_channels WHERE channel_id = $1", message.channel.id)
+    if not result:
+        return
+
+    # Handle counting logic (replace this with your own)
     try:
-        guild_id = message.guild.id
-        channel_id = message.channel.id
+        number = int(message.content.strip())
+        await message.channel.send(str(number + 1))
+    except ValueError:
+        await message.channel.send("❌ Please send a number.")
 
-        conn = await connect_db()
-
-        # Ensure that the last_number column exists
-        await ensure_last_number_column(conn, guild_id)
-
-        # Fetch the last number from the database for the current channel
-        result = await conn.fetchrow(f"""
-            SELECT last_number FROM guild_{guild_id}_counting WHERE channel_id = $1
-        """, channel_id)
-
-        if result:
-            last_number = result['last_number']
-            # Logic for counting based on the last_number
-            if message.content.isdigit():
-                num = int(message.content)
-                if num == last_number + 1:
-                    # Update the last_number in the database
-                    await conn.execute(f"""
-                        UPDATE guild_{guild_id}_counting
-                        SET last_number = $1
-                        WHERE channel_id = $2
-                    """, num, channel_id)
-                    await message.add_reaction('✅')
-                else:
-                    await message.add_reaction('❌')
-
-        else:
-            print(f"No counting data found for channel {channel_id} in guild {guild_id}.")
-    except Exception as e:
-        print(f"Error in on_message: {e}")
-    finally:
-        await conn.close()
-
-# Add a new shop item (simplified)
-@bot.command()
-async def shop(ctx):
-    try:
-        conn = await connect_db()
-        guild_id = ctx.guild.id
-
-        # Example items, extend as needed
-        items = {
-            "Mystery Box": 100,
-            "Rare Item": 500,
-        }
-
-        embed = discord.Embed(title="Shop", description="Buy items with your points!")
-        for item, price in items.items():
-            embed.add_field(name=item, value=f"Price: {price} points", inline=False)
-
-        await ctx.send(embed=embed)
-    except Exception as e:
-        await ctx.send(f"Error fetching the shop: {e}")
-    finally:
-        await conn.close()
-
-# Run the bot
-bot.run(DISCORD_TOKEN)
+# --- RUN BOT ---
+bot.run(TOKEN)
