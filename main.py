@@ -5,6 +5,7 @@ import asyncpg
 import json
 import os
 import math
+import random
 from datetime import datetime, timedelta
 
 intents = discord.Intents.default()
@@ -16,6 +17,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
 DATABASE_URL = os.environ["DATABASE_URL"]
+DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
 pool = None
 trivia_questions = []
 
@@ -23,7 +25,16 @@ safe_globals = {
     "__builtins__": {},
     "math": math,
     "pi": math.pi,
-    "e": math.e
+    "e": math.e,
+    "sqrt": math.sqrt,
+    "log": math.log,
+    "log10": math.log10,
+    "sin": math.sin,
+    "cos": math.cos,
+    "tan": math.tan,
+    "abs": abs,
+    "pow": pow,
+    "round": round
 }
 
 async def refresh_trivia():
@@ -93,15 +104,13 @@ async def on_message(message):
         last = row["last_number"] if row else 0
 
         if (result == last + 1) or (last == 0 and result == 1):
-            # valid count
             if row:
                 await conn.execute(f"UPDATE guild_{message.guild.id}_counting SET last_number = $1 WHERE channel_id = $2", result, message.channel.id)
             else:
                 await conn.execute(f"INSERT INTO guild_{message.guild.id}_counting (channel_id, last_number) VALUES ($1, $2)", message.channel.id, result)
         else:
-            # mistake - restart to 1
             await conn.execute(f"UPDATE guild_{message.guild.id}_counting SET last_number = 0 WHERE channel_id = $1", message.channel.id)
-            await message.channel.send(f"Wrong number! Restarting from 1.")
+            await message.channel.send(f"Wrong number or math! `{expr}` is not next. Restarting from 1.")
 
 @tree.command(name="addchannel", description="Add this channel as a counting channel")
 async def addchannel(interaction: discord.Interaction):
@@ -111,7 +120,7 @@ async def addchannel(interaction: discord.Interaction):
             INSERT INTO guild_{interaction.guild.id}_counting (channel_id, last_number)
             VALUES ($1, 0)
             ON CONFLICT (channel_id) DO NOTHING
-        """, interaction.channel_id)
+        """, interaction.channel.id)
     await interaction.response.send_message("This channel is now a counting channel!", ephemeral=True)
 
 @tree.command(name="removechannel", description="Remove this counting channel")
@@ -119,7 +128,7 @@ async def removechannel(interaction: discord.Interaction):
     async with pool.acquire() as conn:
         await conn.execute(f"""
             DELETE FROM guild_{interaction.guild.id}_counting WHERE channel_id = $1
-        """, interaction.channel_id)
+        """, interaction.channel.id)
     await interaction.response.send_message("This channel is no longer a counting channel.", ephemeral=True)
 
 @tree.command(name="daily", description="Claim your daily reward")
@@ -159,7 +168,6 @@ async def balance(interaction: discord.Interaction):
 
 @tree.command(name="trivia", description="Answer a trivia question!")
 async def trivia(interaction: discord.Interaction):
-    import random
     q = random.choice(trivia_questions)
     correct = q["correct"]
 
@@ -168,10 +176,6 @@ async def trivia(interaction: discord.Interaction):
             super().__init__(timeout=30)
             for key, value in q["choices"].items():
                 self.add_item(discord.ui.Button(label=value, custom_id=key))
-
-        @discord.ui.button(label="Another Question", style=discord.ButtonStyle.secondary, row=1)
-        async def another(self, interaction_btn: discord.Interaction, button: discord.ui.Button):
-            await trivia(interaction_btn)
 
         async def interaction_check(self, i: discord.Interaction) -> bool:
             chosen = i.data['custom_id']
@@ -185,4 +189,4 @@ async def trivia(interaction: discord.Interaction):
     embed = discord.Embed(title=q["question"])
     await interaction.response.send_message(embed=embed, view=TriviaView(), ephemeral=True)
 
-bot.run(os.environ["DISCORD_TOKEN"])
+bot.run(DISCORD_TOKEN)
