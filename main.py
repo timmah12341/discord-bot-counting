@@ -171,14 +171,17 @@ async def on_message(message):
 
     channels = await db.fetch("SELECT channel_id FROM counting_channels WHERE guild_id = $1", message.guild.id)
     if any(str(message.channel.id) == str(row['channel_id']) for row in channels):
-        # Add your counting logic here
+        # Handle only even numbers in counting channels
         if message.content.isdigit():
-            next_count = str(int(message.content) + 1)
-            await message.channel.send(next_count)  # Auto reply with next number
+            count = int(message.content)
+            if count % 2 == 0:  # If the number is even
+                await message.channel.send(str(count + 2))  # Send the next even number
+            else:
+                await message.channel.send(str(count + 1))  # If odd, correct to next even number
         else:
-            await message.channel.send("❌ Please provide a valid number to continue counting.")
-    else:
-        await bot.process_commands(message)
+            pass  # Ignore non-numeric messages
+
+    await bot.process_commands(message)
 
 # --- Utility ---
 async def ensure_user(user_id, guild_id):
