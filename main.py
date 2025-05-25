@@ -66,7 +66,7 @@ async def on_message(message):
                 (message.guild.id, message.channel.id))
     data = cur.fetchone()
     if not data:
-        cur.execute("INSERT INTO counting (guild_id, channel_id, current_number) VALUES (%s, %s, 0)",
+        cur.execute("INSERT INTO counting (guild_id, channel_id, last_number) VALUES (%s, %s, 0)",
                     (message.guild.id, message.channel.id))
         conn.commit()
         expected = 0
