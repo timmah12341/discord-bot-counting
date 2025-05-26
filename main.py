@@ -1,5 +1,4 @@
-# Writing the full bot code to a file for easier download
-bot_code = '''\
+
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
@@ -204,9 +203,4 @@ async def use(interaction: discord.Interaction, item: str):
     await interaction.response.send_message(f"🎉 {effect}")
 
 bot.run(TOKEN)
-'''
 
-with open("/mnt/data/main.py", "w") as f:
-    f.write(bot_code)
-
-"/mnt/data/main.py"
