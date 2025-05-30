@@ -1,53 +1,54 @@
-
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
 import os
-import psycopg2
-from dotenv import load_dotenv
 import json
+import asyncio
+import psycopg2
 from datetime import datetime, timedelta
-
-load_dotenv()
-TOKEN = os.getenv("DISCORD_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL")
 
 intents = discord.Intents.default()
 intents.messages = True
 intents.guilds = True
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
-tree = bot.tree
 
-conn = psycopg2.connect(DATABASE_URL)
+bot = commands.Bot(command_prefix="!", intents=intents)
+TOKEN = os.getenv("DISCORD_TOKEN")
+
+DB_URL = os.getenv("DATABASE_URL")
+conn = psycopg2.connect(DB_URL, sslmode="require")
 cur = conn.cursor()
+
+# --- Setup: Ensure tables exist
+cur.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id BIGINT,
+    guild_id BIGINT,
+    balance INTEGER DEFAULT 0,
+    inventory TEXT DEFAULT '[]',
+    last_daily TIMESTAMP,
+    PRIMARY KEY (user_id, guild_id)
+)""")
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS shop (
+    item TEXT PRIMARY KEY,
+    price INTEGER,
+    description TEXT
+)""")
 
 cur.execute("""
 CREATE TABLE IF NOT EXISTS counting (
     guild_id BIGINT,
     channel_id BIGINT,
-    last_number BIGINT DEFAULT 0,
+    last_number INTEGER DEFAULT 0,
     last_user BIGINT,
     PRIMARY KEY (guild_id, channel_id)
-);
-""")
-cur.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    user_id BIGINT,
-    guild_id BIGINT,
-    balance BIGINT DEFAULT 0,
-    inventory JSON DEFAULT '[]',
-    last_daily TIMESTAMP,
-    PRIMARY KEY (user_id, guild_id)
-);
-""")
+)""")
+
 conn.commit()
 
-@bot.event
-async def on_ready():
-    await tree.sync()
-    print(f"Logged in as {bot.user}")
-
+# --- Counting
 @bot.event
 async def on_message(message):
     if message.author.bot:
@@ -55,152 +56,160 @@ async def on_message(message):
 
     guild_id = message.guild.id
     channel_id = message.channel.id
-    author_id = message.author.id
+    user_id = message.author.id
 
-    cur.execute("SELECT last_number FROM counting WHERE guild_id=%s AND channel_id=%s", (guild_id, channel_id))
-    row = cur.fetchone()
-    if not row:
-        cur.execute("INSERT INTO counting (guild_id, channel_id, last_number, last_user) VALUES (%s, %s, %s, %s)",
-                    (guild_id, channel_id, 0, None))
-        conn.commit()
-        return
-    last_number = row[0]
     try:
-        user_number = int(message.content)
-    except ValueError:
-        return
-
-    expected = last_number + 2
-    if user_number == expected:
-        cur.execute("UPDATE counting SET last_number=%s, last_user=%s WHERE guild_id=%s AND channel_id=%s",
-                    (user_number, author_id, guild_id, channel_id))
-        conn.commit()
-        await message.channel.send(f"✅ {message.author.mention} counted {user_number}")
-    else:
-        cur.execute("UPDATE counting SET last_number=0, last_user=NULL WHERE guild_id=%s AND channel_id=%s",
+        cur.execute("SELECT last_number, last_user FROM counting WHERE guild_id=%s AND channel_id=%s",
                     (guild_id, channel_id))
-        conn.commit()
-        await message.channel.send(f"❌ Wrong number! Count reset to 0.")
-
-@tree.command(name="daily", description="Claim your daily reward")
-async def daily(interaction: discord.Interaction):
-    user_id = interaction.user.id
-    guild_id = interaction.guild.id
-    now = datetime.utcnow()
-    cur.execute("SELECT balance, last_daily FROM users WHERE user_id=%s AND guild_id=%s", (user_id, guild_id))
-    row = cur.fetchone()
-    if not row:
-        cur.execute("INSERT INTO users (user_id, guild_id, balance, last_daily) VALUES (%s, %s, %s, %s)",
-                    (user_id, guild_id, 100, now))
-        conn.commit()
-        await interaction.response.send_message("✅ Daily claimed! You received 100 coins.")
-        return
-
-    balance, last_daily = row
-    if last_daily and now - last_daily < timedelta(hours=24):
-        await interaction.response.send_message("🕒 You already claimed your daily reward.")
-        return
-
-    cur.execute("UPDATE users SET balance = balance + 100, last_daily = %s WHERE user_id=%s AND guild_id=%s",
-                (now, user_id, guild_id))
-    conn.commit()
-    await interaction.response.send_message("✅ Daily claimed! You received 100 coins.")
-
-@tree.command(name="balance", description="Check your balance")
-async def balance(interaction: discord.Interaction):
-    user_id = interaction.user.id
-    guild_id = interaction.guild.id
-    cur.execute("SELECT balance FROM users WHERE user_id=%s AND guild_id=%s", (user_id, guild_id))
-    row = cur.fetchone()
-    if not row:
-        balance = 0
-        cur.execute("INSERT INTO users (user_id, guild_id, balance) VALUES (%s, %s, %s)",
-                    (user_id, guild_id, 0))
-        conn.commit()
-    else:
-        balance = row[0]
-    await interaction.response.send_message(f"💰 You have {balance} coins.")
-
-items = {
-    "cookie": {"price": 50, "effect": "You ate a cookie! 🍪"},
-    "mystery": {"price": 0, "effect": "❓ You found a strange artifact..."}
-}
-
-class BuyMenu(discord.ui.Select):
-    def __init__(self):
-        options = [
-            discord.SelectOption(label=item, description=f"{data['price']} coins")
-            for item, data in items.items()
-        ]
-        super().__init__(placeholder="Choose an item to buy", options=options, min_values=1, max_values=1)
-
-    async def callback(self, interaction: discord.Interaction):
-        item = self.values[0]
-        user_id = interaction.user.id
-        guild_id = interaction.guild.id
-        cur.execute("SELECT balance, inventory FROM users WHERE user_id=%s AND guild_id=%s", (user_id, guild_id))
         row = cur.fetchone()
+
         if not row:
-            await interaction.response.send_message("❌ You have no coins.")
+            cur.execute("INSERT INTO counting (guild_id, channel_id, last_number, last_user) VALUES (%s, %s, %s, %s)",
+                        (guild_id, channel_id, 0, 0))
+            conn.commit()
+            return  # wait for user to count 1
+
+        last_number, last_user = row
+        try:
+            number = int(message.content)
+        except ValueError:
             return
 
-        balance, inventory = row
-        price = items[item]["price"]
-        if balance < price:
-            await interaction.response.send_message("❌ Not enough coins.")
+        expected = last_number + 1
+        if user_id == last_user:
             return
 
-        inventory = json.loads(inventory or "[]")
-        inventory.append(item)
-        cur.execute("UPDATE users SET balance=balance-%s, inventory=%s WHERE user_id=%s AND guild_id=%s",
-                    (price, json.dumps(inventory), user_id, guild_id))
+        if number == expected and number % 2 == 1:
+            cur.execute("UPDATE counting SET last_number=%s, last_user=%s WHERE guild_id=%s AND channel_id=%s",
+                        (number, user_id, guild_id, channel_id))
+            conn.commit()
+            await message.channel.send(f"{number + 1}")
+        else:
+            await message.channel.send("❌ Wrong number! Restarting from 0.")
+            cur.execute("UPDATE counting SET last_number=0, last_user=NULL WHERE guild_id=%s AND channel_id=%s",
+                        (guild_id, channel_id))
+            conn.commit()
+
+    except Exception as e:
+        print("Counting error:", e)
+    await bot.process_commands(message)
+
+# --- Shop Commands
+@bot.tree.command(name="shop")
+async def shop(interaction: discord.Interaction):
+    cur.execute("SELECT item, price, description FROM shop")
+    rows = cur.fetchall()
+    embed = discord.Embed(title="🛒 Shop", color=0x00ff00)
+    for item, price, desc in rows:
+        embed.add_field(name=f"{item} - {price} coins", value=desc, inline=False)
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="buy")
+@app_commands.describe(item="Select an item to buy")
+async def buy(interaction: discord.Interaction, item: str):
+    user_id = interaction.user.id
+    guild_id = interaction.guild.id
+
+    cur.execute("SELECT price FROM shop WHERE item=%s", (item,))
+    row = cur.fetchone()
+    if not row:
+        await interaction.response.send_message("❌ Item not found.")
+        return
+
+    price = row[0]
+    cur.execute("SELECT balance, inventory FROM users WHERE user_id=%s AND guild_id=%s",
+                (user_id, guild_id))
+    user = cur.fetchone()
+    if not user:
+        cur.execute("INSERT INTO users (user_id, guild_id) VALUES (%s, %s)", (user_id, guild_id))
         conn.commit()
-        await interaction.response.send_message(f"✅ You bought a {item}!")
+        balance = 0
+        inventory = []
+    else:
+        balance, inv_json = user
+        inventory = json.loads(inv_json or "[]")
 
-class BuyView(discord.ui.View):
-    def __init__(self):
-        super().__init__()
-        self.add_item(BuyMenu())
+    if balance < price:
+        await interaction.response.send_message("❌ Not enough coins.")
+        return
 
-@tree.command(name="buy", description="Buy items from the shop")
-async def buy(interaction: discord.Interaction):
-    await interaction.response.send_message("🛒 Select an item to buy:", view=BuyView())
+    inventory.append(item)
+    cur.execute("UPDATE users SET balance=%s, inventory=%s WHERE user_id=%s AND guild_id=%s",
+                (balance - price, json.dumps(inventory), user_id, guild_id))
+    conn.commit()
+    await interaction.response.send_message(f"✅ You bought **{item}**!")
 
-@tree.command(name="inventory", description="See your inventory")
+@bot.tree.command(name="inventory")
 async def inventory(interaction: discord.Interaction):
     user_id = interaction.user.id
     guild_id = interaction.guild.id
     cur.execute("SELECT inventory FROM users WHERE user_id=%s AND guild_id=%s", (user_id, guild_id))
     row = cur.fetchone()
-    if not row or not row[0]:
-        await interaction.response.send_message("🎒 Your inventory is empty.")
-        return
-    inv = json.loads(row[0])
-    if not inv:
-        await interaction.response.send_message("🎒 Your inventory is empty.")
-        return
-    await interaction.response.send_message("🎒 Your inventory: " + ", ".join(inv))
+    items = json.loads(row[0] if row else "[]")
+    embed = discord.Embed(title="🎒 Inventory", description="\n".join(f"• {i}" for i in items) or "Empty", color=0x9999ff)
+    await interaction.response.send_message(embed=embed)
 
-@tree.command(name="use", description="Use an item from your inventory")
-@app_commands.describe(item="The name of the item to use")
+@bot.tree.command(name="use")
+@app_commands.describe(item="Item to use from your inventory")
 async def use(interaction: discord.Interaction, item: str):
     user_id = interaction.user.id
     guild_id = interaction.guild.id
     cur.execute("SELECT inventory FROM users WHERE user_id=%s AND guild_id=%s", (user_id, guild_id))
     row = cur.fetchone()
-    if not row or not row[0]:
-        await interaction.response.send_message("❌ You have no items.")
+    if not row:
+        await interaction.response.send_message("You have no items.")
         return
-    inv = json.loads(row[0])
-    if item not in inv:
-        await interaction.response.send_message("❌ You don't have that item.")
+    inventory = json.loads(row[0])
+    if item not in inventory:
+        await interaction.response.send_message("You don't own that item.")
         return
-    inv.remove(item)
+    inventory.remove(item)
     cur.execute("UPDATE users SET inventory=%s WHERE user_id=%s AND guild_id=%s",
-                (json.dumps(inv), user_id, guild_id))
+                (json.dumps(inventory), user_id, guild_id))
     conn.commit()
-    effect = items[item]["effect"]
-    await interaction.response.send_message(f"🎉 {effect}")
+    await interaction.response.send_message(f"🧪 You used **{item}**!")
+
+# --- Daily Reward
+@bot.tree.command(name="daily")
+async def daily(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    guild_id = interaction.guild.id
+    now = datetime.utcnow()
+    cur.execute("SELECT balance, last_daily FROM users WHERE user_id=%s AND guild_id=%s",
+                (user_id, guild_id))
+    row = cur.fetchone()
+    if not row:
+        balance, last_daily = 0, None
+    else:
+        balance, last_daily = row
+    if last_daily and now - last_daily < timedelta(hours=24):
+        await interaction.response.send_message("⏳ You already claimed your daily reward.")
+        return
+    reward = 100
+    cur.execute("""
+        INSERT INTO users (user_id, guild_id, balance, last_daily)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (user_id, guild_id) DO UPDATE
+        SET balance = users.balance + %s, last_daily = %s
+    """, (user_id, guild_id, reward, now, reward, now))
+    conn.commit()
+    await interaction.response.send_message(f"💰 You received {reward} coins!")
+
+# --- Balance
+@bot.tree.command(name="balance")
+async def balance(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    guild_id = interaction.guild.id
+    cur.execute("SELECT balance FROM users WHERE user_id=%s AND guild_id=%s",
+                (user_id, guild_id))
+    row = cur.fetchone()
+    balance = row[0] if row else 0
+    await interaction.response.send_message(f"💰 Your balance is **{balance}** coins.")
+
+# --- Ready Event
+@bot.event
+async def on_ready():
+    await bot.tree.sync()
+    print(f"Logged in as {bot.user}")
 
 bot.run(TOKEN)
-
